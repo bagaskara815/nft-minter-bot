@@ -1,0 +1,46 @@
+// resolve.js — resolve an OpenSea collection slug into contract + chain
+import { chainSlug } from './parse.js';
+
+// Uses OpenSea API v2 when OPENSEA_KEY is set, else falls back to HTML scrape.
+export async function resolveOpenseaSlug(slug) {
+  const key = process.env.OPENSEA_KEY;
+  if (key) {
+    const r = await fetch(`https://api.opensea.io/api/v2/collections/${slug}`, {
+      headers: { 'x-api-key': key },
+    });
+    if (r.ok) {
+      const j = await r.json();
+      const c = j?.contracts?.[0];
+      if (c?.address && !/^0x0+$/.test(c.address)) {
+        return { contract: c.address, chain: chainSlug(c.chain) };
+      }
+    }
+  }
+
+  // Fallback: scrape the public collection page for the embedded contracts array.
+  const html = await (await fetch(`https://opensea.io/collection/${slug}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0' },
+  })).text();
+
+  const block = html.match(/"contracts":\[[^\]]{0,500}\]/);
+  if (block) {
+    const addr = block[0].match(/0x[a-fA-F0-9]{40}/);
+    const chainM = block[0].match(/"chain":"([\w-]+)"/);
+    if (addr && !/^0x0+$/.test(addr[0])) {
+      return { contract: addr[0], chain: chainSlug(chainM?.[1] || 'ethereum') };
+    }
+  }
+  throw new Error(`could not resolve contract for slug "${slug}" (contract may not be deployed yet)`);
+}
+
+// Normalize a parsed target into { contract, chain, amount, tokenId? }.
+export async function resolveTarget(target) {
+  if (target.source === 'opensea_slug') {
+    const { contract, chain } = await resolveOpenseaSlug(target.slug);
+    return { ...target, source: 'opensea', contract, chain };
+  }
+  if (target.source === 'manifold') {
+    throw new Error('manifold claims require the claim contract; paste the 0x… contract instead');
+  }
+  return target;
+}

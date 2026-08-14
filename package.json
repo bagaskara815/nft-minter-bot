@@ -1,0 +1,23 @@
+{
+  "name": "nft-minter-bot",
+  "version": "1.0.0",
+  "description": "Universal NFT minter Telegram bot — auto-detect mint fn/price/gas across EVM chains + Seadrop",
+  "type": "module",
+  "main": "src/bot.js",
+  "bin": {
+    "nft-mint": "src/mint-cli.js"
+  },
+  "scripts": {
+    "bot": "node src/bot.js",
+    "mint": "node src/mint-cli.js"
+  },
+  "dependencies": {
+    "dotenv": "16.4.7",
+    "ethers": "6.13.5",
+    "node-telegram-bot-api": "0.66.0",
+    "p-limit": "6.2.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
