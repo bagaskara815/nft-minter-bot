@@ -16,9 +16,10 @@ import { ethers } from 'ethers';
 import { parseTarget } from './parse.js';
 import { resolveTarget } from './resolve.js';
 import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
-import { detectSeadrop, getPublicDrop, getAllowlistRoot, tokenStatus } from './seadrop.js';
+import { detectSeadrop, getPublicDrop, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList } from './scatter.js';
+import { getDropStages } from './opensea-drop.js';
 import { getProvider, CHAIN_IDS } from './chains.js';
 import { mintAt, mintWhenOpen, parseWhen, resolveOpenTime } from './schedule.js';
 import { loadWallets, selectWallets, extractWalletSpec } from './wallets.js';
@@ -131,6 +132,38 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
     '',
   ];
 
+  // OpenSea Drops (OS2): list drop stages; note the relayer/GraphQL mint path.
+  if (target.source === 'opensea' && target.slug) {
+    const drop = await getDropStages(target.slug).catch(() => null);
+    if (drop && drop.stages.length) {
+      const now = Math.floor(Date.now() / 1000);
+      lines.push(`⚙️  *OpenSea Drop* — ${drop.typename}`, '', '🎬 *Stages (WIB)*');
+      for (const s of drop.stages) {
+        const price = s.priceUnit ? `${s.priceUnit} ${s.symbol}` : 'FREE';
+        const when = s.startTime ? (s.startTime > now ? `buka ${fmtWIB(s.startTime)}` : '🟢 buka') : '—';
+        // MintModuleQuery does not return stageType (that's auth-gated in
+        // DropEligibilityQuery), so infer the icon from stageType when present,
+        // else from the label text (Public / GTD / presale / allowlist).
+        const lbl = (s.label || '').toLowerCase();
+        let tag;
+        if (s.stageType === 'PUBLIC_SALE' || /public/.test(lbl)) tag = '🌐';
+        else if (s.stageType === 'SIGNED_PRESALE' || /presale|signed/.test(lbl)) tag = '🔏';
+        else if (/gtd|allowlist|allow list|holder|wl\b|whitelist/.test(lbl)) tag = '🎫';
+        else tag = '•';
+        lines.push(`  ${tag} stage ${s.stageIndex}: ${s.label} · ${price} · max ${s.maxPerWallet ?? '?'} · ${when}`);
+      }
+      lines.push(
+        '',
+        '⚠️ Mint via *OpenSea relayer* (tx dibuat server GraphQL).',
+        '    Signed presale butuh sesi login OpenSea — eligibility off-chain.',
+        '    Public stage: bot bisa mint. `/mint <url>` saat stage buka.',
+      );
+      await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
+      return;
+    }
+    // Not an OS2 drop (older Seadrop-direct) → fall through to Seadrop checks.
+  }
+
   // Scatter.art collections: list mint lists + per-wallet eligibility.
   if (target.source === 'scatter') {
     const col = target.scatter;
@@ -160,12 +193,23 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
   if (sd.version) {
     const drop = await getPublicDrop(sd.seadrop, target.contract, provider);
     const root = await getAllowlistRoot(sd.seadrop, target.contract, provider);
+    const mech = await getMintMechanisms(sd.seadrop, target.contract, provider);
     const now = Math.floor(Date.now() / 1000);
     const active = drop.startTime <= now && (drop.endTime === 0 || drop.endTime >= now);
     const countdown = drop.startTime > now
       ? `⏳ buka dalam *${fmtDuration(drop.startTime - now)}*`
       : (active ? '🟢 *SEDANG BUKA*' : '🔴 sudah tutup');
     const window = drop.endTime ? fmtDuration(drop.endTime - drop.startTime) : '∞';
+
+    // Gated mechanisms the bot cannot resolve on-chain.
+    const hasSigned = mech.signers.length > 0;
+    const hasGated = mech.tokenGated.length > 0;
+    const gates = [];
+    if (root) gates.push('🔐 merkle allowlist');
+    if (hasSigned) gates.push('🔏 signed (server signature)');
+    if (hasGated) gates.push('🎫 token-gated');
+    if (!gates.length) gates.push('🌐 public only');
+
     lines.push(
       `⚙️  Seadrop *${sd.version}*  ·  ${active ? '🟢 ACTIVE' : '🔴 inactive'}`,
       countdown,
@@ -181,11 +225,24 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
       '',
       '📋 *Aturan*',
       `    max/wallet  ${drop.maxPerWallet}`,
-      `    allowlist   ${root ? '🔐 ya (' + root.slice(0, 10) + '…)' : '🌐 tidak (public)'}`,
+      `    mekanisme   ${gates.join(', ')}`,
     );
 
-    // Per-wallet eligibility: which wallets are on the allowlist vs public-only.
-    lines.push('', '━━━━━━━━━━━━━━━━━━━━', `👛 *Eligibility — ${chosen.length} wallet*`);
+    // Warn when eligibility is off-chain (signed / token-gated). The bot can
+    // only mint public + merkle allowlist; signed/GTD need OpenSea's signature.
+    if (hasSigned || hasGated) {
+      lines.push('', '⚠️ *Eligibility off-chain*');
+      if (hasSigned) lines.push('    🔏 signed mint — signature diterbitkan server OpenSea per wallet.');
+      if (hasGated) lines.push('    🎫 token-gated — butuh token syarat di wallet.');
+      lines.push(
+        '    Bot *tidak bisa* baca eligibility ini on-chain (bukan merkle).',
+        '    Wallet yang eligible di OpenSea *tidak* terdeteksi di sini.',
+        '    Mint signed/GTD: pakai OpenSea UI, atau tunggu window public.',
+      );
+    }
+
+    // Per-wallet MERKLE eligibility only (the part the bot can resolve).
+    lines.push('', '━━━━━━━━━━━━━━━━━━━━', `👛 *Eligibility merkle — ${chosen.length} wallet*`);
     if (root) {
       for (const w of chosen) {
         const al = await checkAllowlist(sd.seadrop, target.contract, w.address, provider, root);
@@ -193,11 +250,13 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
           const alPrice = ethers.formatEther(al.mintParams[0]);
           lines.push(`✅ \`${w.address.slice(0, 10)}…\`  →  allowlist  ·  ${alPrice} ETH  ·  max ${al.mintParams[1]}`);
         } else {
-          lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  →  public  _(${al.reason || 'tidak di allowlist'})_`);
+          lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  →  ${al.reason || 'tidak di merkle allowlist'}`);
         }
       }
+    } else if (hasSigned || hasGated) {
+      lines.push('_tidak ada merkle allowlist — eligibility via signed/token-gated (off-chain)_');
     } else {
-      lines.push(`🌐 semua ${chosen.length} wallet → *mint public* (tidak ada allowlist)`);
+      lines.push(`🌐 semua ${chosen.length} wallet → *mint public* (tidak ada gate)`);
     }
   } else {
     const st = await tokenStatus(target.contract, provider);

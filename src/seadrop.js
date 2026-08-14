@@ -9,6 +9,8 @@ const SEADROP_ABI = [
   'function getAllowListMerkleRoot(address) view returns (bytes32)',
   'function getAllowedFeeRecipients(address) view returns (address[])',
   'function getCreatorPayoutAddress(address) view returns (address)',
+  'function getSigners(address) view returns (address[])',
+  'function getTokenGatedAllowedTokens(address) view returns (address[])',
   'function mintPublic(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity) payable',
   'function mintAllowList(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity, tuple(uint256 mintPrice, uint256 maxTotalMintableByWallet, uint256 startTime, uint256 endTime, uint256 dropStageIndex, uint256 maxTokenSupplyForStage, uint256 feeBps, bool restrictFeeRecipients) mintParams, bytes32[] proof) payable',
 ];
@@ -76,6 +78,23 @@ export async function getAllowlistRoot(seadropAddr, nftContract, provider) {
   } catch {
     return null;
   }
+}
+
+// Detect the additional gated mint mechanisms a drop uses beyond the merkle
+// allowlist. Signed mints (getSigners non-empty) and token-gated drops
+// (getTokenGatedAllowedTokens non-empty) require an OFF-CHAIN signature or a
+// held token — eligibility is NOT expressible as a merkle proof, so the bot
+// cannot resolve it on-chain. Returns { signers:[], tokenGated:[] }.
+export async function getMintMechanisms(seadropAddr, nftContract, provider) {
+  const c = new ethers.Contract(seadropAddr, SEADROP_ABI, provider);
+  let signers = [];
+  let tokenGated = [];
+  try { signers = await c.getSigners(nftContract); } catch { /* not supported */ }
+  try { tokenGated = await c.getTokenGatedAllowedTokens(nftContract); } catch { /* not supported */ }
+  return {
+    signers: Array.from(signers || []),
+    tokenGated: Array.from(tokenGated || []),
+  };
 }
 
 // Resolve the first allowed fee recipient (required arg for mintPublic).

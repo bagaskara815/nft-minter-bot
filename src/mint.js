@@ -1,9 +1,10 @@
 // mint.js — universal mint engine: detect fn → price → gas → simulate → send → report
 import { ethers } from 'ethers';
 import { getProvider, explorerUrl } from './chains.js';
-import { detectSeadrop, buildSeadropMint, buildAllowListMint, getAllowlistRoot, tokenStatus } from './seadrop.js';
+import { detectSeadrop, buildSeadropMint, buildAllowListMint, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList, buildScatterMint } from './scatter.js';
+import { buildOpenseaMint } from './opensea-drop.js';
 import { fmtWIB } from './time.js';
 
 // Ordered by specificity. Protocol-tagged entries are handled specially.
@@ -113,6 +114,13 @@ export async function mintOne(target, wallet, onEvent = () => {}) {
     return await mintScatter(target, signer, provider, amount, onEvent);
   }
 
+  // OpenSea Drops (OS2): the mint tx is generated server-side via GraphQL
+  // (relayer + requestId). Only route here when we have the collection slug
+  // (collection URL). Assets URLs without a slug fall through to Seadrop.
+  if (target.source === 'opensea' && target.slug) {
+    return await mintOpenseaDrop(target, signer, provider, amount, onEvent);
+  }
+
   // Prefer Seadrop path when the token is Seadrop-managed.
   const sd = await detectSeadrop(target.contract, provider);
   let txRequest;
@@ -146,8 +154,17 @@ export async function mintOne(target, wallet, onEvent = () => {}) {
       fnLabel = `seadrop ${sd.version} mintAllowList × ${amount}`;
       price = built.value;
     } else {
+      // Not on the merkle allowlist. Some drops gate via signed/token-gated
+      // mints (eligibility off-chain, needs OpenSea's signature) — warn so the
+      // user isn't misled into thinking a public fallback covers their spot.
       if (al.hasAllowlist) {
         onEvent({ stage: 'allowlist', eligible: false, reason: al.reason, wallet: signer.address });
+      } else {
+        const mech = await getMintMechanisms(sd.seadrop, target.contract, provider);
+        if (mech.signers.length || mech.tokenGated.length) {
+          const kind = mech.signers.length ? 'signed (butuh signature OpenSea)' : 'token-gated';
+          onEvent({ stage: 'allowlist', eligible: false, wallet: signer.address, reason: `${kind} — fallback ke public` });
+        }
       }
       const built = await buildSeadropMint({
         seadropAddr: sd.seadrop,
@@ -256,6 +273,62 @@ async function mintScatter(target, signer, provider, amount, onEvent) {
       await atx.wait();
     }
   }
+
+  const txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };
+
+  // Simulate before broadcast.
+  try {
+    await provider.call(txRequest);
+  } catch (e) {
+    throw new Error(`simulation revert: ${parseRevert(e)}`);
+  }
+
+  const gas = await autoGas(provider, txRequest);
+  onEvent({ stage: 'gas', gasLimit: gas.gasLimit.toString() });
+
+  const tx = await signer.sendTransaction({ ...txRequest, ...gas });
+  onEvent({ stage: 'sent', hash: tx.hash, explorer: explorerUrl(target.chain, tx.hash) });
+
+  const receipt = await tx.wait();
+  const result = {
+    contract: target.contract,
+    chain: target.chain,
+    amount,
+    fn: fnLabel,
+    priceEth: ethers.formatEther(built.value),
+    hash: tx.hash,
+    block: receipt.blockNumber,
+    gasUsed: receipt.gasUsed.toString(),
+    status: receipt.status === 1 ? 'success' : 'reverted',
+    explorer: explorerUrl(target.chain, tx.hash),
+  };
+  onEvent({ stage: 'done', ...result });
+  return result;
+}
+
+// Mint an OpenSea Drop (OS2) via the GraphQL-built relayer transaction. The
+// tx (to/data/value) is generated server-side per wallet; we simulate → sign →
+// send it directly. Eligibility/signature for signed presale stages is
+// enforced by OpenSea's backend and may require a logged-in session — those
+// fail here with a clear reason (not-eligible / drop-not-minting).
+async function mintOpenseaDrop(target, signer, provider, amount, onEvent) {
+  const slug = target.slug;
+  let built;
+  try {
+    built = await buildOpenseaMint({
+      slug,
+      minterAddress: signer.address,
+      contract: target.contract,
+      chain: target.chain,
+      tokenId: target.tokenId || '0',
+      quantity: amount,
+    });
+  } catch (e) {
+    throw new Error(e.message);
+  }
+
+  const fnLabel = `opensea drop${built.crossChain ? ' (relayer)' : ''} × ${amount}`;
+  onEvent({ stage: 'detected', fn: fnLabel, price: ethers.formatEther(built.value) });
 
   const txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };
 

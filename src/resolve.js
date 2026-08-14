@@ -39,7 +39,8 @@ export async function resolveOpenseaSlug(slug) {
 export async function resolveTarget(target) {
   if (target.source === 'opensea_slug') {
     const { contract, chain } = await resolveOpenseaSlug(target.slug);
-    return { ...target, source: 'opensea', contract, chain };
+    // Keep the slug: OpenSea Drops (OS2) mint via GraphQL keyed by slug.
+    return { ...target, source: 'opensea', slug: target.slug, contract, chain };
   }
   if (target.source === 'scatter') {
     const col = await getScatterCollection(target.slug);
