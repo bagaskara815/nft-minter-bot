@@ -17,6 +17,7 @@ import { parseTarget } from './parse.js';
 import { resolveTarget } from './resolve.js';
 import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
 import { detectSeadrop, getPublicDrop, getAllowlistRoot, tokenStatus } from './seadrop.js';
+import { checkAllowlist } from './allowlist.js';
 import { getProvider, CHAIN_IDS } from './chains.js';
 import { mintAt, mintWhenOpen, parseWhen, resolveOpenTime } from './schedule.js';
 import { loadWallets, selectWallets, extractWalletSpec } from './wallets.js';
@@ -65,32 +66,38 @@ function addJob(meta) {
 }
 
 function fmtJob(j) {
-  const when = j.whenUnix ? fmtWIB(j.whenUnix) : (j.mode === 'open' ? 'saat open' : '—');
-  const w = j.wallets > 1 ? ` (${j.wallets}w)` : '';
-  return `#${j.id} [${j.status}] ${j.mode} \`${j.contract}\` on ${j.chain} × ${j.amount}${w} @ ${when}`;
+  const when = j.whenUnix ? fmtWIB(j.whenUnix) : (j.mode === 'open' ? '⚡ saat buka' : '—');
+  const w = j.wallets > 1 ? ` · ${j.wallets}w` : '';
+  const dot = j.status === 'running' ? '🟢' : j.status === 'watching' ? '👀' : j.status === 'done' ? '✅' : j.status === 'failed' ? '❌' : '⚪';
+  return `${dot} *#${j.id}* ${j.mode} — \`${j.contract.slice(0, 8)}…\` × ${j.amount}${w}\n     ${j.chain} · ${when} · _${j.status}_`;
 }
 
 bot.onText(/^\/start$|^\/help$/, guard(async (msg) => {
   await bot.sendMessage(msg.chat.id, [
-    '*NFT Minter Bot*',
+    '🤖 *NFT MINTER BOT*',
+    '━━━━━━━━━━━━━━━━━━━━',
     '',
-    '`/mint <url|contract> [chain] [amount] [wallets:all|N]` — mint sekarang',
-    '`/mintat <time> | <url|contract> … [wallets:all|N]` — mint terjadwal',
-    '`/mintopen <url|contract> … [wallets:all|N]` — mint saat buka',
-    '`/check <url|contract> [chain]` — dry run, no send',
-    '`/jobs` · `/cancel <id>` — kelola job',
+    '⚡ *Mint*',
+    '`/mint <url|contract> [chain] [amount]` — mint sekarang',
+    '`/mintat <time> | <target> …` — mint terjadwal',
+    '`/mintopen <target> …` — mint saat buka',
+    '',
+    '🔍 *Info & Job*',
+    '`/check <target>` — cek drop + eligibility (no send)',
+    '`/jobs` · `/cancel <id>` — kelola job terjadwal',
     '`/wallet` — daftar wallet + saldo',
     '',
-    '*waktu*: ISO `2026-08-12T14:00`, unix, `in 5m`, `30s`, `2h`, atau `HH:MM` (WIB)',
-    '*wallets*: default 1 (primary). `wallets:all`, `wallets:3`, atau `wallets:1,2` untuk multi.',
-    'Chains: ethereum, base, polygon, arbitrum, optimism, zora, bsc, avalanche, bera, peaq, robinhood',
-    'Auto-detect mint fn, price, gas, Seadrop v1/v2.',
+    '⏱ *Waktu*  ISO `2026-08-12T14:00`, unix, `in 5m`, `30s`, `2h`, `HH:MM` (WIB)',
+    '👛 *Wallets*  default primary. `wallets:all` · `wallets:3` · `wallets:1,2`',
+    '',
+    '🔗 *Chains*  ethereum · base · polygon · arbitrum · optimism · zora · bsc · avalanche · bera · peaq · robinhood',
+    '🧠 Auto-detect: mint fn · harga · gas · Seadrop v1/v2 · allowlist',
   ].join('\n'), { parse_mode: 'Markdown' });
 }));
 
 bot.onText(/^\/wallet$/, guard(async (msg) => {
   const chains = Object.keys(CHAIN_IDS);
-  const lines = [`👛 *${WALLETS.length} wallet* (default: primary)`, ''];
+  const lines = [`👛 *WALLETS — ${WALLETS.length}*`, '━━━━━━━━━━━━━━━━━━━━', ''];
   for (let i = 0; i < WALLETS.length; i++) {
     const w = WALLETS[i];
     const bals = await Promise.allSettled(chains.map(async (chain) => {
@@ -100,20 +107,28 @@ bot.onText(/^\/wallet$/, guard(async (msg) => {
     // Only show chains with a non-zero balance to keep it compact.
     const nonzero = bals
       .filter((r) => r.status === 'fulfilled' && r.value.bal > 0n)
-      .map((r) => `${r.value.chain} ${ethers.formatEther(r.value.bal)}`);
-    lines.push(`${i + 1}. \`${w.address}\``);
-    lines.push(`   ${nonzero.length ? nonzero.join(' · ') : '(saldo 0 di semua chain)'}`);
+      .map((r) => `${r.value.chain} *${ethers.formatEther(r.value.bal)}*`);
+    const label = i === 0 ? ' 🔑 primary' : '';
+    lines.push(`*${i + 1}.*${label} \`${w.address}\``);
+    lines.push(`     💰 ${nonzero.length ? nonzero.join('  ·  ') : '_saldo 0 di semua chain_'}`, '');
   }
   await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
 }));
 
 bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
-  const target = await resolveTarget(parseTarget(match[1]));
+  const { chosen, rest } = pickWallets(match[1]);
+  const target = await resolveTarget(parseTarget(rest));
   const provider = getProvider(target.chain);
   const signer = wallet.connect(provider);
   const amount = target.amount || 1;
 
-  const lines = [`🔍 *Check* \`${target.contract}\` on ${target.chain} × ${amount}`, ''];
+  const lines = [
+    '🔍 *COLLECTION CHECK*',
+    '━━━━━━━━━━━━━━━━━━━━',
+    `📄 \`${target.contract}\``,
+    `🔗 ${target.chain}  ·  🎯 mint × ${amount}`,
+    '',
+  ];
 
   const sd = await detectSeadrop(target.contract, provider);
   if (sd.version) {
@@ -121,32 +136,65 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
     const root = await getAllowlistRoot(sd.seadrop, target.contract, provider);
     const now = Math.floor(Date.now() / 1000);
     const active = drop.startTime <= now && (drop.endTime === 0 || drop.endTime >= now);
-    const openInfo = drop.startTime > now ? `  (buka dalam ${fmtDuration(drop.startTime - now)})` : '';
+    const countdown = drop.startTime > now
+      ? `⏳ buka dalam *${fmtDuration(drop.startTime - now)}*`
+      : (active ? '🟢 *SEDANG BUKA*' : '🔴 sudah tutup');
+    const window = drop.endTime ? fmtDuration(drop.endTime - drop.startTime) : '∞';
     lines.push(
-      `Seadrop: ${sd.version}`,
-      `price/unit: ${ethers.formatEther(drop.mintPrice)} ETH`,
-      `total: ${ethers.formatEther(drop.mintPrice * BigInt(amount))} ETH`,
-      `status: ${active ? '🟢 ACTIVE' : '🔴 inactive'}${openInfo}`,
-      `buka:  ${fmtWIB(drop.startTime)}`,
-      `tutup: ${drop.endTime ? fmtWIB(drop.endTime) : 'tanpa batas'}`,
-      `max/wallet: ${drop.maxPerWallet}`,
-      `allowlist: ${root ? 'ya (' + root.slice(0, 10) + '…)' : 'tidak'}`,
+      `⚙️  Seadrop *${sd.version}*  ·  ${active ? '🟢 ACTIVE' : '🔴 inactive'}`,
+      countdown,
+      '',
+      '💰 *Harga*',
+      `    ${ethers.formatEther(drop.mintPrice)} ETH / unit`,
+      `    ${ethers.formatEther(drop.mintPrice * BigInt(amount))} ETH total (× ${amount})`,
+      '',
+      '🕒 *Jadwal (WIB)*',
+      `    buka   ${fmtWIB(drop.startTime)}`,
+      `    tutup  ${drop.endTime ? fmtWIB(drop.endTime) : 'tanpa batas'}`,
+      `    window ${window}`,
+      '',
+      '📋 *Aturan*',
+      `    max/wallet  ${drop.maxPerWallet}`,
+      `    allowlist   ${root ? '🔐 ya (' + root.slice(0, 10) + '…)' : '🌐 tidak (public)'}`,
     );
+
+    // Per-wallet eligibility: which wallets are on the allowlist vs public-only.
+    lines.push('', '━━━━━━━━━━━━━━━━━━━━', `👛 *Eligibility — ${chosen.length} wallet*`);
+    if (root) {
+      for (const w of chosen) {
+        const al = await checkAllowlist(sd.seadrop, target.contract, w.address, provider, root);
+        if (al.eligible) {
+          const alPrice = ethers.formatEther(al.mintParams[0]);
+          lines.push(`✅ \`${w.address.slice(0, 10)}…\`  →  allowlist  ·  ${alPrice} ETH  ·  max ${al.mintParams[1]}`);
+        } else {
+          lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  →  public  _(${al.reason || 'tidak di allowlist'})_`);
+        }
+      }
+    } else {
+      lines.push(`🌐 semua ${chosen.length} wallet → *mint public* (tidak ada allowlist)`);
+    }
   } else {
     const st = await tokenStatus(target.contract, provider);
+    lines.push('⚙️  *Generic contract* (bukan Seadrop)', '');
     try {
       const fn = await detectMintFunction(target.contract, signer, amount);
       const price = await detectPrice(target.contract, provider, amount);
       lines.push(
-        'Seadrop: no (generic mint)',
-        `fn: ${fn.sig}`,
-        `price: ${ethers.formatEther(price)} ETH`,
+        '💰 *Mint*',
+        `    fn     \`${fn.sig}\``,
+        `    price  ${ethers.formatEther(price)} ETH`,
       );
     } catch (e) {
-      lines.push(`no recognized mint fn: ${e.message}`);
+      lines.push(`⚠️  mint fn tak dikenali: _${e.message}_`);
     }
-    if (st.maxSupply != null) lines.push(`maxSupply: ${st.maxSupply}`);
-    if (st.totalSupply != null) lines.push(`totalSupply: ${st.totalSupply}`);
+    if (st.maxSupply != null || st.totalSupply != null) {
+      lines.push('', '📦 *Supply*');
+      if (st.totalSupply != null && st.maxSupply != null) lines.push(`    ${st.totalSupply} / ${st.maxSupply} minted`);
+      else {
+        if (st.maxSupply != null) lines.push(`    maxSupply   ${st.maxSupply}`);
+        if (st.totalSupply != null) lines.push(`    totalSupply ${st.totalSupply}`);
+      }
+    }
   }
   await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
 }));
@@ -167,14 +215,15 @@ async function streamMint(chatId, target, runner, walletCount = 1) {
   const tag = (ev) => (ev.wallet ? ` \`${ev.wallet.slice(0, 8)}\`` : '');
   const onEvent = async (ev) => {
     switch (ev.stage) {
-      case 'scheduled': await push(`🕒 dijadwalkan ${ev.wib} (${fmtDuration(ev.waitMs / 1000)} lagi)`); break;
-      case 'waiting_open': await push(`⏱ buka on-chain ${ev.wib}`); break;
-      case 'polling': await push(`🔁 poll tiap ${ev.pollMs}ms sampai buka`); break;
-      case 'still_closed': await push(`🔒 percobaan ${ev.attempts}: ${ev.lastErr}`); break;
-      case 'target': await push(`🎯${tag(ev)} \`${ev.contract}\` × ${ev.amount}`); break;
+      case 'scheduled': await push(`🕒 dijadwalkan ${ev.wib} — mulai ${fmtDuration(ev.waitMs / 1000)} lagi`); break;
+      case 'waiting_open': await push(`⏱ nunggu buka on-chain: ${ev.wib}`); break;
+      case 'polling': await push(`🔁 polling tiap ${ev.pollMs}ms sampai buka…`); break;
+      case 'still_closed': await push(`🔒 percobaan #${ev.attempts} — ${ev.lastErr}`); break;
+      case 'target': await push(`🎯${tag(ev)} target \`${ev.contract}\` × ${ev.amount}`); break;
+      case 'allowlist': await push(ev.eligible ? `🔐${tag(ev)} allowlist — eligible ✅` : `🌐${tag(ev)} public — _${ev.reason || 'tak di allowlist'}_`); break;
       case 'detected': await push(`🧩${tag(ev)} ${ev.fn} — 💰 ${ev.price} ETH`); break;
-      case 'gas': await push(`⛽${tag(ev)} gas ${ev.gasLimit}`); break;
-      case 'sent': await push(`📤${tag(ev)} \`${ev.hash}\``); break;
+      case 'gas': await push(`⛽${tag(ev)} gas limit ${ev.gasLimit}`); break;
+      case 'sent': await push(`📤${tag(ev)} terkirim \`${ev.hash.slice(0, 14)}…\``); break;
       case 'wallet_error': await push(`❌ \`${ev.wallet.slice(0, 8)}\` ${ev.error}`); break;
     }
   };
@@ -182,13 +231,17 @@ async function streamMint(chatId, target, runner, walletCount = 1) {
   const results = await runner(onEvent);
   const arr = Array.isArray(results) ? results : [results];
   const ok = arr.filter((r) => r.status === 'success').length;
+  const multi = arr.length > 1;
 
-  const lines = [arr.length > 1 ? `📊 *${ok}/${arr.length} MINTED*` : (arr[0].status === 'success' ? '✅ *MINTED*' : '⚠️ *REVERTED*')];
-  lines.push(`contract: \`${target.contract}\` on ${target.chain}`);
+  const header = multi
+    ? (ok === arr.length ? `🎉 *${ok}/${arr.length} MINTED*` : ok ? `📊 *${ok}/${arr.length} MINTED* (${arr.length - ok} gagal)` : `⚠️ *0/${arr.length} — SEMUA GAGAL*`)
+    : (arr[0].status === 'success' ? '🎉 *MINTED!*' : arr[0].status === 'error' ? '❌ *GAGAL*' : '⚠️ *REVERTED*');
+  const lines = [header, '━━━━━━━━━━━━━━━━━━━━', `📄 \`${target.contract}\``, `🔗 ${target.chain}`, ''];
   for (const r of arr) {
-    if (r.status === 'error') { lines.push(`❌ \`${r.wallet.slice(0, 10)}\` ${r.error}`); continue; }
-    const mark = r.status === 'success' ? '✓' : '⚠';
-    lines.push(`${mark} [${r.hash.slice(0, 12)}…](${r.explorer}) · blok ${r.block}`);
+    if (r.status === 'error') { lines.push(`❌ \`${r.wallet.slice(0, 10)}…\`  ${r.error}`); continue; }
+    const mark = r.status === 'success' ? '✅' : '⚠️';
+    const who = r.wallet ? `\`${r.wallet.slice(0, 8)}…\`  ` : '';
+    lines.push(`${mark} ${who}[${r.hash.slice(0, 12)}…](${r.explorer}) · blok ${r.block}`);
   }
   await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown', disable_web_page_preview: true });
   return { ok, total: arr.length, results: arr };
@@ -221,7 +274,13 @@ bot.onText(/^\/mintat\s+([\s\S]+)/, guard(async (msg, match) => {
   const target = await resolveTarget(parseTarget(targetSpec));
   const job = addJob({ mode: 'at', whenUnix, contract: target.contract, chain: target.chain, amount: target.amount || 1, wallets: chosen.length, status: 'scheduled', chatId: msg.chat.id });
 
-  await bot.sendMessage(msg.chat.id, `🗓 job #${job.id} dijadwalkan ${fmtWIB(whenUnix)}\n\`${target.contract}\` on ${target.chain} × ${job.amount} — ${chosen.length} wallet`, { parse_mode: 'Markdown' });
+  await bot.sendMessage(msg.chat.id, [
+    `🗓 *Job #${job.id} dijadwalkan*`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    `📄 \`${target.contract}\``,
+    `🔗 ${target.chain}  ·  🎯 × ${job.amount}  ·  👛 ${chosen.length} wallet`,
+    `⏰ ${fmtWIB(whenUnix)}`,
+  ].join('\n'), { parse_mode: 'Markdown' });
 
   // Fire-and-forget; streams into its own message when it triggers.
   streamMint(msg.chat.id, target, (onEvent) => {
@@ -240,8 +299,14 @@ bot.onText(/^\/mintopen\s+([\s\S]+)/, guard(async (msg, match) => {
   try { openAt = await resolveOpenTime(target); } catch { /* not seadrop */ }
   const job = addJob({ mode: 'open', whenUnix: openAt, contract: target.contract, chain: target.chain, amount: target.amount || 1, wallets: chosen.length, status: 'watching', chatId: msg.chat.id });
 
-  const when = openAt ? fmtWIB(openAt) : 'belum diketahui (poll simulasi)';
-  await bot.sendMessage(msg.chat.id, `👀 job #${job.id} pantau waktu buka: ${when}\n\`${target.contract}\` on ${target.chain} × ${job.amount} — ${chosen.length} wallet`, { parse_mode: 'Markdown' });
+  const when = openAt ? fmtWIB(openAt) : '_belum diketahui — poll simulasi on-chain_';
+  await bot.sendMessage(msg.chat.id, [
+    `👀 *Job #${job.id} — pantau buka*`,
+    '━━━━━━━━━━━━━━━━━━━━',
+    `📄 \`${target.contract}\``,
+    `🔗 ${target.chain}  ·  🎯 × ${job.amount}  ·  👛 ${chosen.length} wallet`,
+    `⏰ ${when}`,
+  ].join('\n'), { parse_mode: 'Markdown' });
 
   streamMint(msg.chat.id, target, (onEvent) => {
     job.status = 'running';
@@ -253,8 +318,8 @@ bot.onText(/^\/mintopen\s+([\s\S]+)/, guard(async (msg, match) => {
 
 bot.onText(/^\/jobs$/, guard(async (msg) => {
   const active = [...jobs.values()];
-  if (!active.length) { await bot.sendMessage(msg.chat.id, 'no scheduled jobs'); return; }
-  await bot.sendMessage(msg.chat.id, active.map(fmtJob).join('\n'), { parse_mode: 'Markdown' });
+  if (!active.length) { await bot.sendMessage(msg.chat.id, '📭 tidak ada job'); return; }
+  await bot.sendMessage(msg.chat.id, [`📋 *JOBS — ${active.length}*`, '━━━━━━━━━━━━━━━━━━━━', ...active.map(fmtJob)].join('\n'), { parse_mode: 'Markdown' });
 }));
 
 bot.onText(/^\/cancel\s+(\S+)/, guard(async (msg, match) => {
