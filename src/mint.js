@@ -4,7 +4,8 @@ import { getProvider, explorerUrl } from './chains.js';
 import { detectSeadrop, buildSeadropMint, buildAllowListMint, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList, buildScatterMint } from './scatter.js';
-import { buildOpenseaMint } from './opensea-drop.js';
+import { buildOpenseaMint, explainOpenseaError } from './opensea-drop.js';
+import { getSessionCookies } from './opensea-auth.js';
 import { fmtWIB } from './time.js';
 
 // Ordered by specificity. Protocol-tagged entries are handled specially.
@@ -313,18 +314,38 @@ async function mintScatter(target, signer, provider, amount, onEvent) {
 // fail here with a clear reason (not-eligible / drop-not-minting).
 async function mintOpenseaDrop(target, signer, provider, amount, onEvent) {
   const slug = target.slug;
+
+  const buildArgs = {
+    slug,
+    minterAddress: signer.address,
+    contract: target.contract,
+    chain: target.chain,
+    tokenId: target.tokenId || '0',
+    quantity: amount,
+  };
+
+  // Public stages need no login: try building the tx unauthenticated first so
+  // public mints pay zero login latency. Only if OpenSea rejects (drop gated /
+  // not eligible) do we log in (SIWE) and retry — that path is for signed/GTD.
   let built;
   try {
-    built = await buildOpenseaMint({
-      slug,
-      minterAddress: signer.address,
-      contract: target.contract,
-      chain: target.chain,
-      tokenId: target.tokenId || '0',
-      quantity: amount,
-    });
-  } catch (e) {
-    throw new Error(e.message);
+    built = await buildOpenseaMint(buildArgs);
+  } catch (firstErr) {
+    // Retry authenticated. A cached session (pre-warmed) makes this ~0ms.
+    let cookie = null;
+    try {
+      cookie = await getSessionCookies(signer);
+      onEvent({ stage: 'allowlist', eligible: true, wallet: signer.address, reason: 'opensea session aktif' });
+    } catch (e) {
+      // Login itself failed → surface the original (public) error, it's clearer.
+      throw new Error(firstErr.message);
+    }
+    try {
+      built = await buildOpenseaMint({ ...buildArgs, cookie });
+    } catch (authErr) {
+      const { meaning } = explainOpenseaError(authErr.message);
+      throw new Error(`opensea: ${meaning}`);
+    }
   }
 
   const fnLabel = `opensea drop${built.crossChain ? ' (relayer)' : ''} × ${amount}`;

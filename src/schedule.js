@@ -3,8 +3,26 @@ import { fmtWIB } from './time.js';
 import { getProvider } from './chains.js';
 import { mintOne, mintMany } from './mint.js';
 import { detectSeadrop, getPublicDrop } from './seadrop.js';
+import { getSessionCookies } from './opensea-auth.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Pre-warm OpenSea SIWE sessions for all wallets so login never sits in the
+// mint critical path. Tokens are valid for hours; warming during the wait
+// phase means the mint moment only pays for tx-build + send. Best-effort:
+// a failed warm-up is retried lazily by mintOne at mint time.
+async function prewarmOpensea(target, wallets, onEvent) {
+  if (target.source !== 'opensea' || !target.slug) return;
+  const list = Array.isArray(wallets) ? wallets : [wallets];
+  await Promise.all(list.map(async (w) => {
+    try {
+      await getSessionCookies(w);
+      onEvent({ stage: 'allowlist', eligible: true, wallet: w.address, reason: 'opensea session pre-warmed' });
+    } catch (e) {
+      onEvent({ stage: 'allowlist', eligible: false, wallet: w.address, reason: `pre-warm gagal: ${e.message}` });
+    }
+  }));
+}
 
 // Parse a "when" spec into an absolute unix seconds timestamp.
 // Accepts: unix seconds (10 digits), unix ms (13 digits), ISO 8601,
@@ -110,6 +128,10 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
       }
     }
   }
+
+  // Warm OpenSea sessions now (after the coarse wait) so tokens are fresh and
+  // login is off the mint critical path. No-op for non-OpenSea targets.
+  await prewarmOpensea(target, list, onEvent);
 
   onEvent({ stage: 'polling', pollMs });
 

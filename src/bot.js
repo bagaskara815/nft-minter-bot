@@ -19,7 +19,8 @@ import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
 import { detectSeadrop, getPublicDrop, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList } from './scatter.js';
-import { getDropStages } from './opensea-drop.js';
+import { getDropStages, probeOpenseaMint } from './opensea-drop.js';
+import { getSessionCookies } from './opensea-auth.js';
 import { getProvider, CHAIN_IDS } from './chains.js';
 import { mintAt, mintWhenOpen, parseWhen, resolveOpenTime } from './schedule.js';
 import { loadWallets, selectWallets, extractWalletSpec } from './wallets.js';
@@ -152,11 +153,44 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
         else tag = '•';
         lines.push(`  ${tag} stage ${s.stageIndex}: ${s.label} · ${price} · max ${s.maxPerWallet ?? '?'} · ${when}`);
       }
+      // Per-wallet eligibility via the AUTHENTICATED mint probe. The display
+      // resolver (DropEligibilityQuery) returns null for headless sessions, but
+      // buildOpenseaMint (MintActionTimelineQuery) is the resolver that actually
+      // gates minting — a built tx means eligible, a structured error tells why.
+      lines.push('', '━━━━━━━━━━━━━━━━━━━━', `👛 *Eligibility — ${chosen.length} wallet*`);
+      for (const w of chosen) {
+        try {
+          const cookie = await getSessionCookies(w.connect(provider));
+          const probe = await probeOpenseaMint({
+            slug: target.slug,
+            minterAddress: w.address,
+            contract: target.contract,
+            chain: target.chain,
+            tokenId: target.tokenId || '0',
+            quantity: amount,
+            cookie,
+          });
+          if (probe.mintable) {
+            const priceEth = ethers.formatEther(probe.tx.value);
+            const priceLabel = probe.tx.value === 0n ? 'FREE' : `${priceEth} ETH`;
+            lines.push(`✅ \`${w.address.slice(0, 10)}…\`  ELIGIBLE — bisa mint sekarang · ${priceLabel}`);
+          } else if (probe.funds) {
+            lines.push(`💰 \`${w.address.slice(0, 10)}…\`  eligible tapi saldo kurang`);
+          } else if (probe.code === 'DropNotMintingError' || probe.code === 'DropStageNotActiveError') {
+            lines.push(`🕒 \`${w.address.slice(0, 10)}…\`  ${probe.reason} (coba lagi saat stage buka)`);
+          } else if (probe.code === 'InsufficientMintsRemainingError') {
+            lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  ${probe.reason}`);
+          } else {
+            lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  ${probe.reason}`);
+          }
+        } catch (e) {
+          lines.push(`❌ \`${w.address.slice(0, 10)}…\`  gagal cek: ${e.message}`);
+        }
+      }
       lines.push(
         '',
-        '⚠️ Mint via *OpenSea relayer* (tx dibuat server GraphQL).',
-        '    Signed presale butuh sesi login OpenSea — eligibility off-chain.',
-        '    Public stage: bot bisa mint. `/mint <url>` saat stage buka.',
+        '⚠️ Mint via *OpenSea* (tx dibuat server GraphQL, signature/relayer).',
+        '    Public stage tanpa login; signed/GTD login otomatis. `/mint <url>`.',
       );
       await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
       return;
