@@ -10,6 +10,7 @@ const SEADROP_ABI = [
   'function getAllowedFeeRecipients(address) view returns (address[])',
   'function getCreatorPayoutAddress(address) view returns (address)',
   'function mintPublic(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity) payable',
+  'function mintAllowList(address nftContract, address feeRecipient, address minterIfNotPayer, uint256 quantity, tuple(uint256 mintPrice, uint256 maxTotalMintableByWallet, uint256 startTime, uint256 endTime, uint256 dropStageIndex, uint256 maxTokenSupplyForStage, uint256 feeBps, bool restrictFeeRecipients) mintParams, bytes32[] proof) payable',
 ];
 
 const TOKEN_ABI = [
@@ -115,6 +116,36 @@ export async function buildSeadropMint({ seadropAddr, nftContract, minter, quant
     data,
     value: drop.mintPrice * BigInt(quantity),
     drop,
+    feeRecipient,
+    active,
+  };
+}
+
+// Build the mintAllowList transaction request for an allowlisted wallet.
+// `mintParams` is the 8-field tuple and `proof` the bytes32[] merkle proof,
+// both taken from the allowlist tree entry (see allowlist.js).
+export async function buildAllowListMint({ seadropAddr, nftContract, quantity, mintParams, proof, provider }) {
+  const feeRecipient = await getFeeRecipient(seadropAddr, nftContract, provider);
+  const iface = new ethers.Interface(SEADROP_ABI);
+  const data = iface.encodeFunctionData('mintAllowList', [
+    nftContract,
+    feeRecipient,
+    ethers.ZeroAddress, // minterIfNotPayer = payer
+    quantity,
+    mintParams,
+    proof,
+  ]);
+  const now = Math.floor(Date.now() / 1000);
+  const mintPrice = mintParams[0];
+  const startTime = Number(mintParams[2]);
+  const endTime = Number(mintParams[3]);
+  const active = startTime <= now && (endTime === 0 || endTime >= now);
+  return {
+    to: seadropAddr,
+    data,
+    value: mintPrice * BigInt(quantity),
+    startTime,
+    endTime,
     feeRecipient,
     active,
   };

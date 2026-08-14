@@ -1,7 +1,8 @@
 // mint.js — universal mint engine: detect fn → price → gas → simulate → send → report
 import { ethers } from 'ethers';
 import { getProvider, explorerUrl } from './chains.js';
-import { detectSeadrop, buildSeadropMint, tokenStatus } from './seadrop.js';
+import { detectSeadrop, buildSeadropMint, buildAllowListMint, getAllowlistRoot, tokenStatus } from './seadrop.js';
+import { checkAllowlist } from './allowlist.js';
 import { fmtWIB } from './time.js';
 
 // Ordered by specificity. Protocol-tagged entries are handled specially.
@@ -112,22 +113,52 @@ export async function mintOne(target, wallet, onEvent = () => {}) {
   let price;
 
   if (sd.version) {
-    const built = await buildSeadropMint({
-      seadropAddr: sd.seadrop,
-      nftContract: target.contract,
-      minter: signer.address,
-      quantity: amount,
-      provider,
-    });
-    if (!built.active) {
-      const st = await tokenStatus(target.contract, provider);
-      throw new Error(
-        `seadrop ${sd.version}: mint belum aktif (buka ${fmtWIB(built.drop.startTime)}, tutup ${built.drop.endTime ? fmtWIB(built.drop.endTime) : 'tanpa batas'}, maxSupply=${st.maxSupply ?? '?'})`,
-      );
+    // Allowlist-first: if this drop has a merkle allowlist AND this wallet is on
+    // it, mint via mintAllowList (allowlist price/window). Otherwise fall back to
+    // the public drop. This avoids blasting mintPublic while an allowlist-only
+    // window is open (which would revert and burn gas).
+    const root = await getAllowlistRoot(sd.seadrop, target.contract, provider);
+    const al = await checkAllowlist(sd.seadrop, target.contract, signer.address, provider, root);
+
+    if (al.eligible) {
+      const built = await buildAllowListMint({
+        seadropAddr: sd.seadrop,
+        nftContract: target.contract,
+        quantity: amount,
+        mintParams: al.mintParams,
+        proof: al.proof,
+        provider,
+      });
+      onEvent({ stage: 'allowlist', eligible: true, wallet: signer.address });
+      if (!built.active) {
+        throw new Error(
+          `seadrop ${sd.version} allowlist: belum aktif (buka ${fmtWIB(built.startTime)}, tutup ${built.endTime ? fmtWIB(built.endTime) : 'tanpa batas'})`,
+        );
+      }
+      txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };
+      fnLabel = `seadrop ${sd.version} mintAllowList × ${amount}`;
+      price = built.value;
+    } else {
+      if (al.hasAllowlist) {
+        onEvent({ stage: 'allowlist', eligible: false, reason: al.reason, wallet: signer.address });
+      }
+      const built = await buildSeadropMint({
+        seadropAddr: sd.seadrop,
+        nftContract: target.contract,
+        minter: signer.address,
+        quantity: amount,
+        provider,
+      });
+      if (!built.active) {
+        const st = await tokenStatus(target.contract, provider);
+        throw new Error(
+          `seadrop ${sd.version}: public mint belum aktif (buka ${fmtWIB(built.drop.startTime)}, tutup ${built.drop.endTime ? fmtWIB(built.drop.endTime) : 'tanpa batas'}, maxSupply=${st.maxSupply ?? '?'})`,
+        );
+      }
+      txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };
+      fnLabel = `seadrop ${sd.version} mintPublic × ${amount}`;
+      price = built.value;
     }
-    txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };
-    fnLabel = `seadrop ${sd.version} mintPublic × ${amount}`;
-    price = built.value;
   } else {
     const fn = await detectMintFunction(target.contract, signer, amount);
     price = await detectPrice(target.contract, provider, amount);
