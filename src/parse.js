@@ -40,6 +40,11 @@ export function parseTarget(input) {
   m = s.match(/opensea\.io\/collection\/([\w-]+)/);
   if (m) return { source: 'opensea_slug', slug: m[1], amount: extractAmount(s), chain: findChain(stripUrls(s)) };
 
+  // Scatter.art collection URL → slug (resolved via Scatter API).
+  // Handles /collection/<slug>, /c/<slug> (short link), and bare /<slug>.
+  m = s.match(/scatter\.art\/(?:collection\/|c\/)?([\w-]+)/);
+  if (m) return { source: 'scatter', slug: m[1], amount: extractAmount(s) };
+
   // Manifold claim
   m = s.match(/manifold\.xyz\/c\/(\w+)/);
   if (m) return { source: 'manifold', claimId: m[1], amount: extractAmount(s) };

@@ -3,6 +3,7 @@ import { ethers } from 'ethers';
 import { getProvider, explorerUrl } from './chains.js';
 import { detectSeadrop, buildSeadropMint, buildAllowListMint, getAllowlistRoot, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
+import { getEligibleLists, pickBestList, buildScatterMint } from './scatter.js';
 import { fmtWIB } from './time.js';
 
 // Ordered by specificity. Protocol-tagged entries are handled specially.
@@ -106,6 +107,12 @@ export async function mintOne(target, wallet, onEvent = () => {}) {
 
   onEvent({ stage: 'target', contract: target.contract, chain: target.chain, amount });
 
+  // Scatter.art collections use a custom mint entrypoint; the API builds the
+  // tx (proof + signature). Handle entirely here, then return.
+  if (target.source === 'scatter') {
+    return await mintScatter(target, signer, provider, amount, onEvent);
+  }
+
   // Prefer Seadrop path when the token is Seadrop-managed.
   const sd = await detectSeadrop(target.contract, provider);
   let txRequest;
@@ -191,6 +198,87 @@ export async function mintOne(target, wallet, onEvent = () => {}) {
     amount,
     fn: fnLabel,
     priceEth: ethers.formatEther(price),
+    hash: tx.hash,
+    block: receipt.blockNumber,
+    gasUsed: receipt.gasUsed.toString(),
+    status: receipt.status === 1 ? 'success' : 'reverted',
+    explorer: explorerUrl(target.chain, tx.hash),
+  };
+  onEvent({ stage: 'done', ...result });
+  return result;
+}
+
+// Minimal ERC20 ABI for allowance/approve when a Scatter list is token-priced.
+const ERC20_ABI = [
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+// Mint from a Scatter.art collection. Resolves the wallet's eligible lists,
+// picks the best (cheapest native, else token), asks the API to build the tx,
+// approves any ERC20 payment, then simulates → sends → waits.
+async function mintScatter(target, signer, provider, amount, onEvent) {
+  const slug = target.scatter?.slug || target.slug;
+  const col = target.scatter;
+
+  const lists = await getEligibleLists(slug, signer.address);
+  const list = pickBestList(lists);
+  if (!list) {
+    throw new Error(`scatter: wallet ${signer.address.slice(0, 10)}… not eligible for any mint list`);
+  }
+  const listPriceEth = ethers.formatEther(ethers.parseUnits(String(list.token_price || '0'), 18));
+  onEvent({
+    stage: 'allowlist',
+    eligible: true,
+    wallet: signer.address,
+    reason: `list "${list.name}" @ ${list.token_price} ${list.currency_symbol || ''}`.trim(),
+  });
+
+  const built = await buildScatterMint({
+    collectionAddress: target.contract,
+    chainId: col?.chainId ?? undefined,
+    minterAddress: signer.address,
+    lists: [{ id: list.id, quantity: amount }],
+    affiliate: target.affiliate,
+  });
+
+  const fnLabel = `scatter "${list.name}" × ${amount}`;
+  onEvent({ stage: 'detected', fn: fnLabel, price: ethers.formatEther(built.value) });
+
+  // Approve any ERC20 payments the mint requires before sending.
+  for (const erc20 of built.erc20s) {
+    const token = new ethers.Contract(erc20.address, ERC20_ABI, signer);
+    const need = BigInt(erc20.amount);
+    const have = await token.allowance(signer.address, target.contract);
+    if (have < need) {
+      onEvent({ stage: 'approve', token: erc20.address, amount: erc20.amount });
+      const atx = await token.approve(target.contract, ethers.MaxUint256);
+      await atx.wait();
+    }
+  }
+
+  const txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };
+
+  // Simulate before broadcast.
+  try {
+    await provider.call(txRequest);
+  } catch (e) {
+    throw new Error(`simulation revert: ${parseRevert(e)}`);
+  }
+
+  const gas = await autoGas(provider, txRequest);
+  onEvent({ stage: 'gas', gasLimit: gas.gasLimit.toString() });
+
+  const tx = await signer.sendTransaction({ ...txRequest, ...gas });
+  onEvent({ stage: 'sent', hash: tx.hash, explorer: explorerUrl(target.chain, tx.hash) });
+
+  const receipt = await tx.wait();
+  const result = {
+    contract: target.contract,
+    chain: target.chain,
+    amount,
+    fn: fnLabel,
+    priceEth: ethers.formatEther(built.value),
     hash: tx.hash,
     block: receipt.blockNumber,
     gasUsed: receipt.gasUsed.toString(),

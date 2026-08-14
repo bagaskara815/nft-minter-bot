@@ -18,6 +18,7 @@ import { resolveTarget } from './resolve.js';
 import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
 import { detectSeadrop, getPublicDrop, getAllowlistRoot, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
+import { getEligibleLists, pickBestList } from './scatter.js';
 import { getProvider, CHAIN_IDS } from './chains.js';
 import { mintAt, mintWhenOpen, parseWhen, resolveOpenTime } from './schedule.js';
 import { loadWallets, selectWallets, extractWalletSpec } from './wallets.js';
@@ -129,6 +130,31 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
     `🔗 ${target.chain}  ·  🎯 mint × ${amount}`,
     '',
   ];
+
+  // Scatter.art collections: list mint lists + per-wallet eligibility.
+  if (target.source === 'scatter') {
+    const col = target.scatter;
+    lines.push(
+      `⚙️  *Scatter* — ${col?.name || target.slug}`,
+      `📦 ${col?.numItems ?? '?'} / ${col?.maxItems ?? '?'} minted`,
+      '',
+      '━━━━━━━━━━━━━━━━━━━━',
+      `👛 *Eligibility — ${chosen.length} wallet*`,
+    );
+    for (const w of chosen) {
+      const lists = await getEligibleLists(target.slug, w.address);
+      const best = pickBestList(lists);
+      if (!best) {
+        lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  →  _tidak eligible list apa pun_`);
+        continue;
+      }
+      const priceLabel = best.token_price === '0' ? 'FREE' : `${best.token_price} ${best.currency_symbol || ''}`.trim();
+      const others = lists.length > 1 ? ` (+${lists.length - 1} list lain)` : '';
+      lines.push(`✅ \`${w.address.slice(0, 10)}…\`  →  *${best.name}*  ·  ${priceLabel}${others}`);
+    }
+    await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
+    return;
+  }
 
   const sd = await detectSeadrop(target.contract, provider);
   if (sd.version) {

@@ -47,6 +47,16 @@ const EXPLORERS = {
 
 export const explorerUrl = (chain, hash) => (EXPLORERS[chain] || '') + hash;
 
+// Map a numeric chainId back to our canonical chain key (for API responses
+// that return chain_id, e.g. Scatter). Returns null when unknown.
+export function chainKeyFromId(chainId) {
+  const id = Number(chainId);
+  for (const [key, cid] of Object.entries(CHAIN_IDS)) {
+    if (cid === id) return key;
+  }
+  return null;
+}
+
 const providerCache = new Map();
 
 export function getProvider(chain) {
