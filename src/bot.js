@@ -19,7 +19,7 @@ import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
 import { detectSeadrop, getPublicDrop, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList } from './scatter.js';
-import { getDropStages, probeOpenseaMint, getCollectionMeta } from './opensea-drop.js';
+import { getDropStages, getDropEligibility, getCollectionMeta } from './opensea-drop.js';
 import { getSessionCookies } from './opensea-auth.js';
 import { getProvider, CHAIN_IDS, explorerUrl } from './chains.js';
 import { mintAt, mintWhenOpen, parseWhen, resolveOpenTime } from './schedule.js';
@@ -169,35 +169,28 @@ async function runCheck(msg, rawInput) {
         else tag = '•';
         lines.push(`  ${tag} stage ${s.stageIndex}: ${s.label} · ${price} · max ${s.maxPerWallet ?? '?'} · ${when}`);
       }
-      // Per-wallet eligibility via the AUTHENTICATED mint probe. The display
-      // resolver (DropEligibilityQuery) returns null for headless sessions, but
-      // buildOpenseaMint (MintActionTimelineQuery) is the resolver that actually
-      // gates minting — a built tx means eligible, a structured error tells why.
+      // Per-wallet eligibility via DropEligibilityQuery (authed session with the
+      // connected-account hint cookie). This resolves per-stage eligibility even
+      // BEFORE a stage opens — no mint-probe needed.
       lines.push('', '━━━━━━━━━━━━━━━━━━━━', `👛 *Eligibility — ${chosen.length} wallet*`);
       for (const w of chosen) {
         try {
           const cookie = await getSessionCookies(w.connect(provider));
-          const probe = await probeOpenseaMint({
-            slug: target.slug,
-            minterAddress: w.address,
-            contract: target.contract,
-            chain: target.chain,
-            tokenId: target.tokenId || '0',
-            quantity: amount,
-            cookie,
-          });
-          if (probe.mintable) {
-            const priceEth = ethers.formatEther(probe.tx.value);
-            const priceLabel = probe.tx.value === 0n ? 'FREE' : `${priceEth} ETH`;
-            lines.push(`✅ \`${w.address.slice(0, 10)}…\`  ELIGIBLE — bisa mint sekarang · ${priceLabel}`);
-          } else if (probe.funds) {
-            lines.push(`💰 \`${w.address.slice(0, 10)}…\`  eligible tapi saldo kurang`);
-          } else if (probe.code === 'DropNotMintingError' || probe.code === 'DropStageNotActiveError') {
-            lines.push(`🕒 \`${w.address.slice(0, 10)}…\`  ${probe.reason} (coba lagi saat stage buka)`);
-          } else if (probe.code === 'InsufficientMintsRemainingError') {
-            lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  ${probe.reason}`);
+          const elig = await getDropEligibility(target.slug, w.address, cookie);
+          if (!elig || !elig.authed) {
+            lines.push(`⚠️ \`${w.address.slice(0, 10)}…\`  eligibility tak terbaca (login OK, resolver null)`);
+            continue;
+          }
+          const ok = elig.stages.filter((s) => s.isEligible);
+          if (ok.length) {
+            const parts = ok.map((s) => {
+              const label = s.stageType === 'PUBLIC_SALE' ? 'public' : s.stageType === 'SIGNED_PRESALE' ? 'presale/GTD' : `stage ${s.stageIndex}`;
+              const price = s.priceUnit != null ? (s.priceUnit ? `${s.priceUnit} ${s.symbol}` : 'FREE') : '';
+              return `${label}${price ? ` (${price})` : ''}`;
+            });
+            lines.push(`✅ \`${w.address.slice(0, 10)}…\`  eligible: ${parts.join(', ')}`);
           } else {
-            lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  ${probe.reason}`);
+            lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  tidak eligible stage apa pun`);
           }
         } catch (e) {
           lines.push(`❌ \`${w.address.slice(0, 10)}…\`  gagal cek: ${e.message}`);

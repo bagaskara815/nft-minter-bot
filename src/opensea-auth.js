@@ -79,7 +79,7 @@ function jwtExp(token) {
 async function fetchNonce(jar) {
   const r = await fetch(`${BASE}/siwe/nonce`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...BROWSER_HEADERS },
+    headers: { 'content-type': 'application/json', cookie: cookieHeader(jar), ...BROWSER_HEADERS },
   });
   if (!r.ok) throw new Error(`siwe nonce ${r.status}`);
   absorbCookies(jar, r);
@@ -91,9 +91,15 @@ async function fetchNonce(jar) {
 // Perform a full SIWE login for `wallet`. Returns { cookies, token, exp }.
 async function login(wallet) {
   const jar = new Map();
+  const address = ethers.getAddress(wallet.address);
+
+  // Tell OpenSea which wallet this session is for, BEFORE the nonce request.
+  // The eligibility resolver keys off this cookie; without it isEligible is
+  // null even for a valid authenticated session (learned from osnm-z).
+  jar.set('connected-account-server-hint', address.toLowerCase());
+
   const nonce = await fetchNonce(jar);
   const issuedAt = new Date().toISOString();
-  const address = ethers.getAddress(wallet.address);
 
   const messageStr = buildSiweMessage({ address, nonce, issuedAt });
   const signature = await wallet.signMessage(messageStr);
