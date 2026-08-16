@@ -81,12 +81,12 @@ bot.onText(/^\/start$|^\/help$/, guard(async (msg) => {
     '━━━━━━━━━━━━━━━━━━━━',
     '',
     '⚡ *Mint*',
-    '`/mint <url|contract> [chain] [amount]` — mint sekarang',
-    '`/mintat <time> | <target> …` — mint terjadwal',
-    '`/mintopen <target> …` — mint saat buka',
+    '`/mint` (`/m`) `<url|contract> [chain] [amount]` — mint sekarang',
+    '`/mintat` (`/ma`) `<time> | <target> …` — mint terjadwal',
+    '`/mintopen` (`/mo`) `<target> …` — mint saat buka',
     '',
     '🔍 *Info & Job*',
-    '`/check <target>` — cek drop + eligibility (no send)',
+    '`/check` (`/c`) `<target>` — cek drop + eligibility (no send)',
     '`/jobs` · `/cancel <id>` — kelola job terjadwal',
     '`/wallet` — daftar wallet + saldo',
     '',
@@ -118,8 +118,10 @@ bot.onText(/^\/wallet$/, guard(async (msg) => {
   await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
 }));
 
-bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
-  const { chosen, rest } = pickWallets(match[1]);
+// Run the collection-check flow for a raw target string (used by /check and by
+// the bare-URL auto-listener). `rawInput` may include a wallet spec.
+async function runCheck(msg, rawInput) {
+  const { chosen, rest } = pickWallets(rawInput);
   const target = await resolveTarget(parseTarget(rest));
   const provider = getProvider(target.chain);
   const signer = wallet.connect(provider);
@@ -336,7 +338,21 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
       }
     }
   }
-  await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
+  await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown', disable_web_page_preview: true });
+}
+
+bot.onText(/^\/(?:check|c)\s+(.+)/s, guard(async (msg, match) => {
+  await runCheck(msg, match[1]);
+}));
+
+// Auto-listener: a bare message that is just a supported mint URL (OpenSea /
+// Scatter collection, or a raw 0x contract) triggers /check automatically.
+const BARE_TARGET_RE = /^(?:https?:\/\/(?:www\.)?(?:opensea\.io|scatter\.art)\/\S+(?:\s.*)?|0x[a-fA-F0-9]{40}(?:\s.*)?)$/;
+bot.onText(BARE_TARGET_RE, guard(async (msg) => {
+  const text = (msg.text || '').trim();
+  // Ignore anything that's actually a command (handled elsewhere).
+  if (text.startsWith('/')) return;
+  await runCheck(msg, text);
 }));
 
 // Shared streaming-mint runner: streams progress into one editable message,
@@ -394,7 +410,7 @@ function pickWallets(input) {
   return { chosen, rest };
 }
 
-bot.onText(/^\/mint\s+([\s\S]+)/, guard(async (msg, match) => {
+bot.onText(/^\/(?:mint|m)\s+([\s\S]+)/, guard(async (msg, match) => {
   const { chosen, rest } = pickWallets(match[1]);
   const target = await resolveTarget(parseTarget(rest));
   await streamMint(msg.chat.id, target, (onEvent) => mintMany(target, chosen, onEvent), chosen.length);
@@ -402,7 +418,7 @@ bot.onText(/^\/mint\s+([\s\S]+)/, guard(async (msg, match) => {
 
 // /mintat <time> | <url|contract> [chain] [amount] [wallets:all|N|1,2]
 // The "|" separates the time spec from the target (times may contain spaces).
-bot.onText(/^\/mintat\s+([\s\S]+)/, guard(async (msg, match) => {
+bot.onText(/^\/(?:mintat|ma)\s+([\s\S]+)/, guard(async (msg, match) => {
   const raw = match[1];
   const bar = raw.indexOf('|');
   if (bar === -1) throw new Error('usage: /mintat <time> | <url|contract> [chain] [amount] [wallets:all|N]');
@@ -432,7 +448,7 @@ bot.onText(/^\/mintat\s+([\s\S]+)/, guard(async (msg, match) => {
 }));
 
 // /mintopen <url|contract> [chain] [amount] [wallets:all|N] — mint on open.
-bot.onText(/^\/mintopen\s+([\s\S]+)/, guard(async (msg, match) => {
+bot.onText(/^\/(?:mintopen|mo)\s+([\s\S]+)/, guard(async (msg, match) => {
   const { chosen, rest } = pickWallets(match[1]);
   const target = await resolveTarget(parseTarget(rest));
   let openAt = null;
