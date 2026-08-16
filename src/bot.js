@@ -37,7 +37,30 @@ const ALLOWED = (process.env.ALLOWED_USER_IDS || '')
 const WALLETS = loadWallets();
 const wallet = WALLETS[0];
 if (!wallet) { console.error('[FAIL] no wallets loaded (set PRIVATE_KEY in .env)'); process.exit(1); }
-const bot = new TelegramBot(TOKEN, { polling: true });
+// dropPendingUpdates: ignore the backlog Telegram queued while the bot was
+// offline (or from a previous deployment sharing this token), so stale/foreign
+// commands aren't processed on start.
+// Resilient polling: bounded long-poll + auto-restart on transient network
+// errors so an unstable laptop/VPS connection can't leave the bot hung.
+const bot = new TelegramBot(TOKEN, {
+  polling: {
+    params: { timeout: 30 },
+    interval: 300,
+    autoStart: true,
+    dropPendingUpdates: true,
+  },
+  request: { timeout: 30000 }, // fail a stuck HTTP call instead of hanging forever
+});
+
+// Send that never throws — a blocked user / 403 must not crash the process.
+async function safeSend(chatId, text, opts) {
+  try {
+    return await bot.sendMessage(chatId, text, opts);
+  } catch (e) {
+    console.error(`[send] ${chatId}: ${e.message}`);
+    return null;
+  }
+}
 
 function isAllowed(msg) {
   if (ALLOWED.length === 0) return false;
@@ -47,13 +70,13 @@ function isAllowed(msg) {
 function guard(handler) {
   return async (msg, match) => {
     if (!isAllowed(msg)) {
-      await bot.sendMessage(msg.chat.id, `⛔ Not authorized. Your ID: ${msg.from?.id}`);
+      await safeSend(msg.chat.id, `⛔ Not authorized. Your ID: ${msg.from?.id}`);
       return;
     }
     try {
       await handler(msg, match);
     } catch (e) {
-      await bot.sendMessage(msg.chat.id, `❌ ${e.message}`);
+      await safeSend(msg.chat.id, `❌ ${e.message}`);
     }
   };
 }
@@ -436,7 +459,7 @@ bot.onText(/^\/(?:mintat|ma)\s+([\s\S]+)/, guard(async (msg, match) => {
     job.status = 'running';
     return mintAt(target, chosen, whenUnix, onEvent, { signal: job.controller.signal });
   }, chosen.length).then((r) => { job.status = r.ok === r.total ? 'done' : (r.ok ? 'partial' : 'reverted'); })
-    .catch((e) => { job.status = 'failed'; bot.sendMessage(msg.chat.id, `❌ job #${job.id}: ${e.message}`); })
+    .catch((e) => { job.status = 'failed'; safeSend(msg.chat.id, `❌ job #${job.id}: ${e.message}`); })
     .finally(() => { setTimeout(() => jobs.delete(job.id), 60_000); });
 }));
 
@@ -461,7 +484,7 @@ bot.onText(/^\/(?:mintopen|mo)\s+([\s\S]+)/, guard(async (msg, match) => {
     job.status = 'running';
     return mintWhenOpen(target, chosen, onEvent, { signal: job.controller.signal });
   }, chosen.length).then((r) => { job.status = r.ok === r.total ? 'done' : (r.ok ? 'partial' : 'reverted'); })
-    .catch((e) => { job.status = 'failed'; bot.sendMessage(msg.chat.id, `❌ job #${job.id}: ${e.message}`); })
+    .catch((e) => { job.status = 'failed'; safeSend(msg.chat.id, `❌ job #${job.id}: ${e.message}`); })
     .finally(() => { setTimeout(() => jobs.delete(job.id), 60_000); });
 }));
 
@@ -480,7 +503,30 @@ bot.onText(/^\/cancel\s+(\S+)/, guard(async (msg, match) => {
   await bot.sendMessage(msg.chat.id, `🛑 cancelled job #${job.id}`);
 }));
 
-bot.on('polling_error', (e) => console.error('[poll]', e.message));
+// Polling error handler with auto-recovery. Network blips (ETIMEDOUT, ENOTFOUND,
+// EFATAL, socket hang up) can silently stop the poll loop; detect them and
+// restart polling with backoff so an unstable connection self-heals.
+let pollRestarting = false;
+bot.on('polling_error', async (e) => {
+  const msg = e?.message || String(e);
+  console.error('[poll]', msg);
+  const transient = /ETIMEDOUT|ENOTFOUND|ECONNRESET|EAI_AGAIN|EFATAL|socket hang up|network|timeout|aggregate/i.test(msg);
+  if (!transient || pollRestarting) return;
+  pollRestarting = true;
+  try {
+    await bot.stopPolling().catch(() => {});
+    await new Promise((r) => setTimeout(r, 3000));
+    await bot.startPolling().catch((err) => console.error('[poll] restart failed:', err?.message));
+    console.error('[poll] polling restarted after transient error');
+  } finally {
+    pollRestarting = false;
+  }
+});
+
+// Last-resort guard: an unexpected async error (e.g. a background sendMessage
+// to a blocked user) must be logged, not crash the whole bot.
+process.on('unhandledRejection', (e) => console.error('[unhandled]', e?.message || e));
+process.on('uncaughtException', (e) => console.error('[uncaught]', e?.message || e));
 
 console.log(`[BOT] up as ${wallet.address}`);
 console.log(`[BOT] allowed users: ${ALLOWED.length ? ALLOWED.join(', ') : '(none — set ALLOWED_USER_IDS)'}`);

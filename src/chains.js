@@ -59,15 +59,23 @@ export function chainKeyFromId(chainId) {
 
 const providerCache = new Map();
 
+// Per-chain request timeout (ms) so a stalled RPC never hangs a mint/poll.
+const RPC_TIMEOUT_MS = Number(process.env.RPC_TIMEOUT_MS) || 15000;
+
 export function getProvider(chain) {
   if (providerCache.has(chain)) return providerCache.get(chain);
   const url = RPCS[chain];
   if (!url) throw new Error(`unknown chain: ${chain}`);
 
+  // Wrap the URL in a FetchRequest so we can bound how long a single RPC call
+  // may hang on an unstable connection.
+  const req = new ethers.FetchRequest(url);
+  req.timeout = RPC_TIMEOUT_MS;
+
   const chainId = CHAIN_IDS[chain];
   const network = chainId ? { chainId, name: chain } : undefined;
   const provider = new ethers.JsonRpcProvider(
-    url,
+    req,
     network,
     network ? { staticNetwork: true } : undefined,
   );
