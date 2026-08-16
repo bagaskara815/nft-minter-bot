@@ -15,6 +15,7 @@ const HASHES = {
   mintModule: process.env.OS_HASH_MINT_MODULE || '98b96c9357f51630dc14c3bcab0de47684337a0aa726277b82820d6ee354217d',
   mintTimeline: process.env.OS_HASH_MINT_TIMELINE || 'f13295cbe1dabcf1c58d8280ecc15e5ee7b04425b539e0c5261a8e4b2693d9d0',
   dropEligibility: process.env.OS_HASH_DROP_ELIGIBILITY || 'e1b54354df0d26d39c6b81429bd5e5d37749eaa4bdc027f987128f8c1e7d2308',
+  mintQuery: process.env.OS_HASH_MINT_QUERY || '15d500b9dab94cd28b158ebc43ac446c3c71250178c22cdbdf152bc302154310',
 };
 
 // Native token sentinel (paying with the chain's own coin).
@@ -86,6 +87,47 @@ export async function getDropStages(slug) {
     };
   });
   return { typename: drop.__typename, stages };
+}
+
+// Fetch collection metadata + external links for a slug. The GraphQL API does
+// not expose website/socials, so those come from the OpenSea REST v2 API
+// (needs OPENSEA_KEY). Returns null when the slug isn't found.
+export async function getCollectionMeta(slug) {
+  const j = await persistedQuery('MintQuery', HASHES.mintQuery, { slug }).catch(() => null);
+  const c = j?.data?.collectionBySlug;
+
+  const meta = {
+    name: c?.name || slug,
+    verified: !!c?.isVerified,
+    address: c?.address || null,
+    chain: c?.chain?.identifier || null,
+    imageUrl: c?.imageUrl || null,
+    opensea: `https://opensea.io/collection/${slug}`,
+    website: null,
+    twitter: null,
+    discord: null,
+    telegram: null,
+    owner: null,
+  };
+
+  // Enrich with external links from REST v2 when an API key is available.
+  const key = process.env.OPENSEA_KEY;
+  if (key) {
+    try {
+      const r = await fetch(`https://api.opensea.io/api/v2/collections/${slug}`, { headers: { 'x-api-key': key } });
+      if (r.ok) {
+        const d = await r.json();
+        meta.website = d.project_url || null;
+        meta.twitter = d.twitter_username ? `https://x.com/${d.twitter_username}` : null;
+        meta.discord = d.discord_url || null;
+        meta.telegram = d.telegram_url || null;
+        meta.owner = d.owner || null;
+        if (d.name) meta.name = d.name;
+      }
+    } catch { /* REST enrichment is best-effort */ }
+  }
+
+  return meta;
 }
 
 // Build the mint transaction via OpenSea's action timeline. Pays with the

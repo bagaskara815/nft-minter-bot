@@ -19,9 +19,9 @@ import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
 import { detectSeadrop, getPublicDrop, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList } from './scatter.js';
-import { getDropStages, probeOpenseaMint } from './opensea-drop.js';
+import { getDropStages, probeOpenseaMint, getCollectionMeta } from './opensea-drop.js';
 import { getSessionCookies } from './opensea-auth.js';
-import { getProvider, CHAIN_IDS } from './chains.js';
+import { getProvider, CHAIN_IDS, explorerUrl } from './chains.js';
 import { mintAt, mintWhenOpen, parseWhen, resolveOpenTime } from './schedule.js';
 import { loadWallets, selectWallets, extractWalletSpec } from './wallets.js';
 import { fmtWIB, fmtDuration } from './time.js';
@@ -138,7 +138,21 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
     const drop = await getDropStages(target.slug).catch(() => null);
     if (drop && drop.stages.length) {
       const now = Math.floor(Date.now() / 1000);
-      lines.push(`⚙️  *OpenSea Drop* — ${drop.typename}`, '', '🎬 *Stages (WIB)*');
+      const meta = await getCollectionMeta(target.slug).catch(() => null);
+      const title = meta?.name || target.slug;
+      lines.push(`⚙️  *OpenSea Drop* — ${title}${meta?.verified ? ' ✔️' : ''}`);
+      const links = [];
+      if (meta?.website) links.push(`[Website](${meta.website})`);
+      if (meta?.twitter) links.push(`[Twitter](${meta.twitter})`);
+      if (meta?.discord) links.push(`[Discord](${meta.discord})`);
+      if (meta?.telegram) links.push(`[Telegram](${meta.telegram})`);
+      links.push(`[explorer](${explorerUrl(target.chain, '').replace(/\/tx\/$/, '/address/') + target.contract})`);
+      lines.push(`🔗 ${links.join('  ·  ')}`);
+      if (meta?.owner) {
+        const oUrl = explorerUrl(target.chain, '').replace(/\/tx\/$/, '/address/') + meta.owner;
+        lines.push(`👤 deployer: [${meta.owner.slice(0, 10)}…${meta.owner.slice(-4)}](${oUrl})`);
+      }
+      lines.push('', '🎬 *Stages (WIB)*');
       for (const s of drop.stages) {
         const price = s.priceUnit ? `${s.priceUnit} ${s.symbol}` : 'FREE';
         const when = s.startTime ? (s.startTime > now ? `buka ${fmtWIB(s.startTime)}` : '🟢 buka') : '—';
@@ -187,12 +201,7 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
           lines.push(`❌ \`${w.address.slice(0, 10)}…\`  gagal cek: ${e.message}`);
         }
       }
-      lines.push(
-        '',
-        '⚠️ Mint via *OpenSea* (tx dibuat server GraphQL, signature/relayer).',
-        '    Public stage tanpa login; signed/GTD login otomatis. `/mint <url>`.',
-      );
-      await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
+      await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown', disable_web_page_preview: true });
       return;
     }
     // Not an OS2 drop (older Seadrop-direct) → fall through to Seadrop checks.
@@ -201,9 +210,21 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
   // Scatter.art collections: list mint lists + per-wallet eligibility.
   if (target.source === 'scatter') {
     const col = target.scatter;
+    const scLinks = [];
+    if (col?.website) scLinks.push(`[Website](${col.website})`);
+    if (col?.twitter) scLinks.push(`[Twitter](${col.twitter})`);
+    if (col?.discord) scLinks.push(`[Discord](${col.discord})`);
+    if (col?.opensea) scLinks.push(`[OpenSea](${col.opensea})`);
     lines.push(
       `⚙️  *Scatter* — ${col?.name || target.slug}`,
       `📦 ${col?.numItems ?? '?'} / ${col?.maxItems ?? '?'} minted`,
+    );
+    if (scLinks.length) lines.push(`🔗 ${scLinks.join('  ·  ')}`);
+    if (col?.creator) {
+      const cUrl = explorerUrl(target.chain, '').replace(/\/tx\/$/, '/address/') + col.creator;
+      lines.push(`👤 deployer: [${col.creator.slice(0, 10)}…${col.creator.slice(-4)}](${cUrl})`);
+    }
+    lines.push(
       '',
       '━━━━━━━━━━━━━━━━━━━━',
       `👛 *Eligibility — ${chosen.length} wallet*`,
@@ -219,7 +240,7 @@ bot.onText(/^\/check\s+(.+)/s, guard(async (msg, match) => {
       const others = lists.length > 1 ? ` (+${lists.length - 1} list lain)` : '';
       lines.push(`✅ \`${w.address.slice(0, 10)}…\`  →  *${best.name}*  ·  ${priceLabel}${others}`);
     }
-    await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
+    await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown', disable_web_page_preview: true });
     return;
   }
 

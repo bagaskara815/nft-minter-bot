@@ -24,6 +24,11 @@ export async function getScatterCollection(slug) {
       name: j.name,
       maxItems: j.max_items,
       numItems: j.num_items,
+      website: j.website || null,
+      twitter: j.twitter || null,
+      discord: j.discord || null,
+      opensea: j.opensea || null,
+      creator: j.creator_address || j.owner || null,
       slug,
     };
   } catch {
