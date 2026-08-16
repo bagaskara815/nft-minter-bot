@@ -4,12 +4,13 @@
 
 **Universal EVM NFT minter — Telegram bot + CLI**
 
-Auto-detects the mint function, price, and gas. Understands OpenSea Seadrop (v1/v2) and per-wallet allowlist eligibility. Simulates every transaction before it touches the chain.
+Auto-detects the mint path across OpenSea Seadrop, OpenSea Drops (OS2), Scatter.art, and generic ERC721/1155. Resolves per-wallet eligibility (merkle allowlist + OpenSea signed/GTD via automated SIWE login). Simulates every transaction before it touches the chain.
 
 ![Node](https://img.shields.io/badge/node-%3E%3D18-3C873A?logo=node.js&logoColor=white)
 ![ethers](https://img.shields.io/badge/ethers-6.13-2535A0)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
 ![Chains](https://img.shields.io/badge/chains-11-627EEA)
+![Platforms](https://img.shields.io/badge/platforms-Seadrop%20%C2%B7%20OpenSea%20%C2%B7%20Scatter-orange)
 ![License](https://img.shields.io/badge/private-use-lightgrey)
 
 </div>
@@ -17,12 +18,12 @@ Auto-detects the mint function, price, and gas. Understands OpenSea Seadrop (v1/
 ---
 
 ## 📖 Contents
-
 - [✨ Features](#-features)
+- [🎨 Platforms](#-platforms)
 - [🔗 Supported Chains](#-supported-chains)
 - [🚀 Setup](#-setup)
 - [🎮 Bot Commands](#-bot-commands)
-- [🔐 Allowlist &amp; Eligibility](#-allowlist--eligibility)
+- [🔐 Eligibility & Auth](#-eligibility--auth)
 - [👛 Multi-Wallet](#-multi-wallet)
 - [⌨️ CLI](#️-cli)
 - [🧩 Input Shapes](#-input-shapes)
@@ -33,19 +34,31 @@ Auto-detects the mint function, price, and gas. Understands OpenSea Seadrop (v1/
 ---
 
 ## ✨ Features
-
 | | Feature | Detail |
 |:--:|---------|--------|
-| 🎯 | **Auto-detect mint path** | Seadrop v1/v2 (`mintPublic` / `mintAllowList`) or generic ERC721/1155 (`mint`, `publicMint`, `claim`, …), probed via `eth_call` |
-| 💰 | **Auto price** | Reads `mintPrice` from Seadrop, or probes `price` / `cost` / `mintPrice` on generic contracts |
-| ⛽ | **Auto gas** | `estimateGas` + 20% buffer, EIP-1559 fees with headroom (legacy fallback) |
+| 🎯 | **Auto-detect mint path** | Seadrop v1/v2, OpenSea Drops (OS2 relayer), Scatter.art, or generic ERC721/1155 (`mint`/`publicMint`/`claim`), probed via `eth_call` |
+| 💰 | **Auto price + gas** | Reads price on-chain; `estimateGas` +20% buffer, EIP-1559 with headroom (legacy fallback) |
 | 🧪 | **Simulate-first** | Every mint runs `eth_call` before broadcast — a reverting simulate never spends gas |
-| 🔐 | **Allowlist-aware** | Checks the wallet against the on-chain merkle allowlist; mints via `mintAllowList` with proof when eligible, else public |
-| 👀 | **Eligibility preview** | `/check` reports which wallets are allowlisted vs public, with allowlist price/max |
-| 🕒 | **Scheduled mint** | `/mintat` fires at an absolute or relative time |
-| ⚡ | **Open-mint snipe** | `/mintopen` polls on-chain open state, sends the instant the drop opens |
+| 🔐 | **Merkle allowlist** | Auto-fetches the tree, resolves per-wallet proof, mints `mintAllowList`; else falls back to public |
+| 🔏 | **OpenSea signed/GTD** | Automated SIWE login (headless, uses your key) → eligibility probe + server-built mint tx |
+| 🎫 | **Scatter.art** | Resolves eligible mint lists via public API (proof + signature server-built), ERC20 payment support |
+| 👀 | **Eligibility preview** | `/check` shows per-wallet eligibility, price/max, stages, project links + deployer |
+| 🕒 | **Scheduled + snipe** | `/mintat` fires at a time; `/mintopen` polls on-chain and mints the instant it opens |
 | 🪙 | **Multi-wallet** | Fan one mint across many wallets concurrently (independent nonce + simulation) |
+| ⚡ | **Session pre-warm** | SIWE sessions cached & warmed during the wait so login never sits in the mint critical path |
+| 🔗 | **Auto-listener + shortcuts** | Bare URL/contract triggers `/check`; `/m` `/c` `/ma` `/mo` shortcuts |
 | 🖥️ | **Telegram + CLI** | Same engine behind an owner-guarded bot and a headless CLI |
+
+---
+
+## 🎨 Platforms
+
+| Platform | How it mints | Eligibility |
+|----------|-------------|-------------|
+| **Seadrop v1/v2** (direct) | `mintPublic` / `mintAllowList` straight to the SeaDrop contract | merkle allowlist resolved on-chain, no login |
+| **OpenSea Drops (OS2)** | tx built server-side via GraphQL (relayer + `requestId`) | public no-login; signed/GTD via automated SIWE session |
+| **Scatter.art** | tx built via Scatter public API (proof + signature) | eligible mint lists per wallet, no API key |
+| **Generic ERC721/1155** | probes `mint`/`publicMint`/`claim` signatures | none (public) |
 
 ---
 
@@ -89,8 +102,9 @@ cp .env.example .env      # then fill in the required values
 | `PRIVATE_KEY` | ✅ | Primary minting wallet |
 | `PRIVATE_KEYS` | — | Extra wallets, comma-separated private keys |
 | `WALLETS_FILE` | — | JSON wallets file path (`wallets.json`) |
-| `OPENSEA_KEY` | — | OpenSea API key for reliable slug→contract resolution |
+| `OPENSEA_KEY` | — | OpenSea REST v2 key — enables slug resolution + project links (website/socials) |
 | `RPC_*` | — | Per-chain RPC overrides |
+| `OS_HASH_*` | — | Override OpenSea persisted-query hashes if the frontend redeploys (`OS_HASH_MINT_MODULE`, `OS_HASH_MINT_TIMELINE`, `OS_HASH_DROP_ELIGIBILITY`, `OS_HASH_MINT_QUERY`) |
 
 </details>
 
@@ -103,19 +117,20 @@ npm run bot
 ---
 
 ## 🎮 Bot Commands
+| Command | Shortcut | Action |
+|---------|:--------:|--------|
+| `/mint <target> [wallets:all\|N]` | `/m` | detect → simulate → send → report |
+| `/mintat <time> \| <target> [wallets:all\|N]` | `/ma` | schedule a mint for a time |
+| `/mintopen <target> [wallets:all\|N]` | `/mo` | poll on-chain open, mint the instant it opens |
+| `/check <target> [wallets:all\|N]` | `/c` | **dry run** — config, price, stages, per-wallet eligibility, links |
+| `/jobs` | — | list scheduled / running jobs |
+| `/cancel <id>` | — | cancel a scheduled or watching job |
+| `/wallet` | — | list loaded wallets + non-zero balances per chain |
+| `/help` | — | command reference |
 
-| Command | Action |
-|---------|--------|
-| `/mint <target> [wallets:all\|N]` | detect → simulate → send → report |
-| `/mintat <time> \| <target> [wallets:all\|N]` | schedule a mint for a time |
-| `/mintopen <target> [wallets:all\|N]` | poll on-chain open, mint the instant it opens |
-| `/check <target> [wallets:all\|N]` | **dry run** — config, price, schedule, per-wallet eligibility |
-| `/jobs` | list scheduled / running jobs |
-| `/cancel <id>` | cancel a scheduled or watching job |
-| `/wallet` | list loaded wallets + non-zero balances per chain |
-| `/help` | command reference |
+> **Auto-listener:** send a bare OpenSea/Scatter URL or `0x…` contract (no command) and the bot auto-runs `/check`.
 
-`<target>` = an OpenSea/Zora URL or a raw `0x…` contract. See [Input Shapes](#-input-shapes).
+`<target>` = an OpenSea / Scatter / Zora URL or a raw `0x…` contract. See [Input Shapes](#-input-shapes).
 
 <details>
 <summary><b>Time formats for <code>/mintat</code></b></summary>
@@ -133,28 +148,47 @@ All times displayed by the bot are **WIB**. The `|` separator splits the time fr
 
 ---
 
-## 🔐 Allowlist &amp; Eligibility
+## 🔐 Eligibility & Auth
 
-For Seadrop drops, the bot resolves each wallet's path **before** minting:
+The bot resolves each wallet's eligibility **before** minting, per platform:
+
+### Seadrop merkle allowlist (on-chain, no login)
 
 ```
-detectSeadrop → getAllowListMerkleRoot
+getAllowListMerkleRoot
   ├─ root = 0x0 (no allowlist)      → mintPublic
   ├─ root set, wallet ON allowlist  → mintAllowList  (allowlist price + merkle proof)
   └─ root set, wallet NOT eligible  → fall back to mintPublic
 ```
 
 <details>
-<summary><b>How eligibility is resolved</b> (<code>src/allowlist.js</code>)</summary>
+<summary><b>How merkle eligibility is resolved</b> (<code>src/allowlist.js</code>)</summary>
 
 1. Read the merkle root via `getAllowListMerkleRoot`. Zero root → no allowlist, everyone mints public.
-2. Find the latest `allowListURI` from the `AllowListUpdated` event log (topic0 `0xefcd7e…52efa5`, filtered by NFT contract).
+2. Find the latest `allowListURI` from the `AllowListUpdated` event log (topic0 `0xefcd7e…52efa5`).
 3. Download the allowlist tree JSON (supports `ipfs://` → gateway, or HTTPS).
-4. Look up the wallet — the JSON ships the merkle `proof` and `mintParams` per wallet, so no local merkle computation is needed.
+4. Look up the wallet — the JSON ships the merkle `proof` and `mintParams`, so no local merkle computation is needed.
 
 </details>
 
-Preview eligibility without sending:
+### OpenSea signed / GTD (automated SIWE)
+
+OpenSea signed presale / GTD stages gate the mint behind a logged-in session. Since the bot holds the private key it performs the SIWE handshake headlessly (`src/opensea-auth.js`):
+
+```
+POST /siwe/nonce → wallet.signMessage(EIP-4361) → POST /siwe/verify → access_token (JWT)
+```
+
+- Session cached per wallet, keyed by address; **one login reused** across `/check`, `/mint`, `/mintat`, `/mintopen`.
+- Auto-renews via `refresh_token` before expiry; full re-login only when refresh fails.
+- Pre-warmed during the scheduled wait, so login never sits in the mint critical path.
+- Eligibility is probed via the **authenticated mint-build** (`MintActionTimelineQuery`) — the resolver that actually gates minting — not the display resolver (which returns null for headless sessions).
+
+### Scatter.art (public API, no key)
+
+Resolves the wallet's eligible mint lists (`eligible-invite-lists`), picks the best (cheapest native > paid), and asks the API to build the tx (proof + signature included). ERC20-priced lists are auto-approved before minting.
+
+### Preview
 
 ```
 /check 0xCONTRACT robinhood wallets:all
@@ -166,30 +200,20 @@ Preview eligibility without sending:
 📄 0xCONTRACT
 🔗 robinhood  ·  🎯 mint × 1
 
-⚙️  Seadrop v2  ·  🔴 inactive
-⏳ buka dalam 16j 48m
+⚙️  OpenSea Drop — Gogh Punks
+🔗 Website · Twitter · Discord · explorer
+👤 deployer: 0xc7f55cE6…7AA6
 
-💰 Harga
-    0.005 ETH / unit
-    0.005 ETH total (× 1)
-
-🕒 Jadwal (WIB)
-    buka   Sab, 15 Agu 2026 02:00 WIB
-    tutup  Sab, 15 Agu 2026 02:02 WIB
-    window 2m
-
-📋 Aturan
-    max/wallet  1
-    allowlist   🌐 tidak (public)
+🎬 Stages (WIB)
+  🎫 stage 1: GTD · FREE · max 5 · 🟢 buka
+  🌐 stage 0: Public stage · 0.0003 ETH · max 20 · 🟢 buka
 
 ━━━━━━━━━━━━━━━━━━━━
-👛 Eligibility — 3 wallet
-✅ 0x36473f15…  →  allowlist  ·  0.005 ETH  ·  max 2
-⚪ 0x8a1b2c3d…  →  public
-⚪ 0x9e4f5a6b…  →  public
+👛 Eligibility — 1 wallet
+✅ 0x5e4bD635…  ELIGIBLE — bisa mint sekarang · 0.0003 ETH
 ```
 
-> ⚠️ **Not yet handled:** `mintSigned` (server-signature presale) and `mintAllowedTokenHolder` (token-gated / GTD) fall back to public. If an RPC caps the `getLogs` block range, the event lookup may fail and treat the wallet as public — a false negative, never a crash.
+> ⚠️ **Honest limits:** No on-chain mint has yet been confirmed end-to-end — paths are tested up to tx-build + auth-accepted. OpenSea signed/GTD auth is verified (mint resolver processes authed requests), but a signed tx landing on-chain is unproven. `mintAllowedTokenHolder` (token-gated) falls back to public. If an RPC caps `getLogs` range, merkle event lookup may false-negative (never crashes).
 
 ---
 
@@ -248,6 +272,7 @@ node src/mint-cli.js --wallets all --when-open 0xABC... base 1
 |-------|---------|
 | OpenSea collection URL | `https://opensea.io/collection/toadlings` |
 | OpenSea assets URL | `https://opensea.io/assets/base/0xABC.../5` |
+| Scatter.art URL | `https://scatter.art/c/<slug>` · `/collection/<slug>` |
 | Zora collect URL | `https://zora.co/collect/base:0xABC.../1` |
 | Direct contract | `0xABC... on base 5` |
 | Amount syntax | trailing `N` or `xN` anywhere (`0xABC base x10`) |
@@ -257,14 +282,14 @@ node src/mint-cli.js --wallets all --when-open 0xABC... base 1
 ---
 
 ## ⚙️ Detection Pipeline
-
 ```
-parse → resolve slug → detect Seadrop v1/v2 (getPublicDrop)
-      ├─ Seadrop:  allowlist check per wallet → mintAllowList | mintPublic
-      └─ generic:  probe mint signatures (mint / publicMint / claim / …)
-                 → detect price (mintPrice / price / cost / …)
-      → auto gas (+20% buffer, EIP-1559 or legacy)
-      → simulate (eth_call) → send → wait → report
+parse → resolve (slug/URL/contract)
+  ├─ Scatter    → API: eligible lists → build tx (proof + signature)
+  ├─ OpenSea OS2 → GraphQL: stages → build tx (relayer + requestId); SIWE for signed/GTD
+  ├─ Seadrop    → allowlist check per wallet → mintAllowList | mintPublic
+  └─ generic    → probe mint signatures (mint / publicMint / claim / …) → detect price
+  → auto gas (+20% buffer, EIP-1559 or legacy)
+  → simulate (eth_call) → send → wait → report
 ```
 
 > For `/mintopen` and `--when-open`, the simulate doubles as the open detector: while it reverts (drop closed) it keeps polling; the first passing simulate = drop open → send in that block.
@@ -285,6 +310,8 @@ parse → resolve slug → detect Seadrop v1/v2 (getPublicDrop)
 ## 📌 Notes
 
 - **Manifold** claims need the claim contract address — paste the `0x…` directly.
+- **Scatter.art** is resolved by slug only (no address lookup) — paste the Scatter URL, not a bare `0x…`.
+- **OpenSea Drops** persisted-query hashes can change on frontend redeploys — override via `OS_HASH_*` env vars if `/check` or minting starts failing.
 - **Robinhood Chain** defaults to `https://robinhood-rpc.publicnode.com` (override via `RPC_ROBINHOOD`). In Indonesia the official `rpc.mainnet.chain.robinhood.com` endpoint can be blocked by ISP DNS; the public node avoids that.
 - **Jobs are in-memory** — a bot restart clears scheduled/watching jobs.
 - **`EFATAL: AggregateError`** on startup usually means the bot cannot reach `api.telegram.org` (ISP block / no network), not a code bug.
