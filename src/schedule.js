@@ -63,38 +63,40 @@ export function parseWhen(spec, nowMs = Date.now()) {
   throw new Error(`cannot parse time: "${spec}"`);
 }
 
-// Resolve the on-chain open time for a Seadrop target (startTime). Returns
-// unix seconds, or null if not Seadrop / not configured.
-export async function resolveOpenTime(target) {
+// Resolve the on-chain launch window for a Seadrop target. Returns
+// { startTime, endTime } unix seconds (endTime 0 → open-ended), or null if the
+// target isn't a configured Seadrop.
+export async function resolveOpenWindow(target) {
   const provider = getProvider(target.chain);
   const sd = await detectSeadrop(target.contract, provider);
   if (!sd.version) return null;
   const drop = await getPublicDrop(sd.seadrop, target.contract, provider);
-  return drop.startTime > 0 ? drop.startTime : null;
+  if (!(drop.startTime > 0)) return null;
+  return { startTime: drop.startTime, endTime: drop.endTime > 0 ? drop.endTime : 0 };
 }
 
-// Mint at (or just after) an absolute unix timestamp. Coarse-sleeps until a
-// short lead before the target, then hands off to the open-poll loop so the
-// tx lands on the first simulatable block. `wallets` may be one wallet or an
-// array; returns an array of per-wallet results.
+// Back-compat: just the open time (used for display). null when unknown.
+export async function resolveOpenTime(target) {
+  const win = await resolveOpenWindow(target);
+  return win ? win.startTime : null;
+}
+
+// Mint at (or just after) an absolute unix timestamp. Delegates the full
+// precise wait + hot-path landing to mintWhenOpen (startAtUnix), so waiting
+// never competes with the poll watch-window. `wallets` may be one or an array.
 export async function mintAt(target, wallets, whenUnix, onEvent = () => {}, opts = {}) {
-  const leadMs = opts.leadMs ?? 1500;
-  const now = Date.now();
-  const targetMs = whenUnix * 1000;
-  const waitMs = Math.max(0, targetMs - now - leadMs);
-
+  const waitMs = Math.max(0, whenUnix * 1000 - Date.now());
   onEvent({ stage: 'scheduled', when: whenUnix, waitMs, wib: fmtWIB(whenUnix) });
-
-  // Coarse wait in <=15s chunks so a cancelled job/process notices sooner.
-  let remaining = waitMs;
-  while (remaining > 0) {
-    if (opts.signal?.aborted) throw new Error('schedule cancelled');
-    const chunk = Math.min(remaining, 15000);
-    await sleep(chunk);
-    remaining -= chunk;
-  }
   return mintWhenOpen(target, wallets, onEvent, { ...opts, startAtUnix: whenUnix });
 }
+
+// Tunables adopted from osnm-z:
+//   HOT_LEAD_MS   — wake precisely this long before open, then busy-sleep to the
+//                   exact second (osnm-z CALLDATA_HOT_LEAD_MS = 2000).
+//   REFRESH_MS    — while waiting far out, re-probe the on-chain window this
+//                   often so a shifted start time is picked up (StageChanged).
+const HOT_LEAD_MS = 2000;
+const REFRESH_MS = 30_000;
 
 const CLOSED_RE = /not active|belum aktif|notactive|not started|notstarted|notenabled|not enabled|invalidmerkleproof|invalid merkle|simulation revert|execution reverted|mint not|before start|too early/i;
 const FATAL_RE = /insufficient funds|invalid private key|unknown chain|no recognized mint/i;
@@ -106,33 +108,79 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
   const list = Array.isArray(wallets) ? wallets : [wallets];
 
   const pollMs = opts.pollMs ?? 400;
-  const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000; // 10 min default watch window
-  const deadline = Date.now() + timeoutMs;
+  const timeoutMs = opts.timeoutMs ?? 10 * 60 * 1000; // 10 min watch window (polling phase only)
+  // Injectable for tests; defaults to the real engine. Prod behavior unchanged.
+  const attemptMint = opts.mintOne ?? mintOne;
+  const attemptMany = opts.mintMany ?? mintMany;
 
-  // Determine the earliest sensible poll moment.
+  // Resolve the launch window. Prefer an explicit start (scheduled /ma); else
+  // read it on-chain. endTime lets us detect an already-ended drop up front.
   let openAt = opts.startAtUnix ?? null;
+  let endAt = opts.endAtUnix ?? 0;
   if (openAt == null) {
-    try { openAt = await resolveOpenTime(target); } catch { openAt = null; }
+    try {
+      const win = await resolveOpenWindow(target);
+      if (win) { openAt = win.startTime; endAt = win.endTime; }
+    } catch { openAt = null; }
   }
+
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  if (openAt != null && endAt > 0 && nowSec() >= endAt) {
+    throw new Error(`stage sudah berakhir (tutup ${fmtWIB(endAt)}) — tidak ada yang bisa di-mint`);
+  }
+
+  // Two-phase wait (osnm-z pattern):
+  //  1. Coarse loop far from open — re-probe the on-chain window each REFRESH_MS
+  //     so a shifted start time is picked up; abort if the drop ended meanwhile.
+  //  2. Hot path — once within HOT_LEAD_MS of open, busy-sleep to the exact
+  //     second so the tx is submitted on the first live block, not a poll later.
   if (openAt != null) {
-    const leadMs = opts.leadMs ?? 1500;
-    const preWait = openAt * 1000 - Date.now() - leadMs;
-    if (preWait > 0) {
+    while (true) {
+      if (opts.signal?.aborted) throw new Error('schedule cancelled');
+      const remainingMs = openAt * 1000 - Date.now();
+      if (remainingMs <= HOT_LEAD_MS) break;
+
+      const chunk = Math.min(remainingMs - HOT_LEAD_MS, REFRESH_MS);
       onEvent({ stage: 'waiting_open', openAt, wib: fmtWIB(openAt) });
-      let rem = preWait;
-      while (rem > 0) {
-        if (opts.signal?.aborted) throw new Error('schedule cancelled');
-        const chunk = Math.min(rem, 15000);
-        await sleep(chunk);
-        rem -= chunk;
+      await sleep(chunk);
+
+      // Re-probe only when we resolved the window on-chain (no explicit start).
+      // A creator can move the start; follow it. Best-effort — keep the old
+      // openAt if the probe fails transiently.
+      if (opts.startAtUnix == null) {
+        try {
+          const win = await resolveOpenWindow(target);
+          if (win) {
+            if (win.endTime > 0 && nowSec() >= win.endTime) {
+              throw new Error(`stage sudah berakhir (tutup ${fmtWIB(win.endTime)}) — tidak ada yang bisa di-mint`);
+            }
+            openAt = win.startTime; endAt = win.endTime;
+          }
+        } catch (e) {
+          if (/sudah berakhir/.test(e.message)) throw e;
+        }
       }
     }
+
+    // Warm OpenSea sessions before the hot path so login is off the critical
+    // path and tokens are fresh at open. No-op for non-OpenSea targets.
+    await prewarmOpensea(target, list, onEvent);
+
+    // Hot path: sleep precisely to the open second.
+    while (true) {
+      if (opts.signal?.aborted) throw new Error('schedule cancelled');
+      const remainingMs = openAt * 1000 - Date.now();
+      if (remainingMs <= 0) break;
+      await sleep(remainingMs);
+    }
+  } else {
+    // No known open time (generic contract): warm now, poll the simulation.
+    await prewarmOpensea(target, list, onEvent);
   }
 
-  // Warm OpenSea sessions now (after the coarse wait) so tokens are fresh and
-  // login is off the mint critical path. No-op for non-OpenSea targets.
-  await prewarmOpensea(target, list, onEvent);
-
+  // Start the poll watch-window AFTER the wait, so the full timeout covers the
+  // polling phase — never consumed by waiting for open.
+  const deadline = Date.now() + timeoutMs;
   onEvent({ stage: 'polling', pollMs });
 
   let attempts = 0;
@@ -144,9 +192,9 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
       // Probe openness with the first wallet. A fatal (non-timing) error
       // aborts; a closed-style revert means keep polling; success means open
       // → fan out to the remaining wallets.
-      const first = await mintOne(target, list[0], onEvent);
+      const first = await attemptMint(target, list[0], onEvent);
       if (list.length === 1) return [first];
-      const rest = await mintMany(target, list.slice(1), onEvent, opts);
+      const rest = await attemptMany(target, list.slice(1), onEvent, opts);
       return [first, ...rest];
     } catch (e) {
       lastErr = e.shortMessage || e.message;
