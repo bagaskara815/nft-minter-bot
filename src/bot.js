@@ -19,7 +19,7 @@ import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
 import { detectSeadrop, getPublicDrop, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList } from './scatter.js';
-import { getDropStages, getDropEligibility, getCollectionMeta } from './opensea-drop.js';
+import { getDropStages, getDropEligibility, getCollectionMeta, getEligibleOpenWindow } from './opensea-drop.js';
 import { getSessionCookies } from './opensea-auth.js';
 import { getProvider, CHAIN_IDS, explorerUrl } from './chains.js';
 import { mintAt, mintWhenOpen, parseWhen, resolveOpenTime } from './schedule.js';
@@ -467,8 +467,30 @@ bot.onText(/^\/(?:mintat|ma)\s+([\s\S]+)/, guard(async (msg, match) => {
 bot.onText(/^\/(?:mintopen|mo)\s+([\s\S]+)/, guard(async (msg, match) => {
   const { chosen, rest } = pickWallets(match[1]);
   const target = await resolveTarget(parseTarget(rest));
+
+  // Resolve the stage this wallet is actually eligible for. For OpenSea drops
+  // this is the earliest eligible stage (GTD/presale before public); falls
+  // back to the on-chain Seadrop window. Shown on the card so the user sees
+  // which stage + price + time will be targeted, not "unknown".
   let openAt = null;
-  try { openAt = await resolveOpenTime(target); } catch { /* not seadrop */ }
+  let stageLabel = null;
+  if (target.source === 'opensea' && target.slug) {
+    try {
+      const cookie = await getSessionCookies(chosen[0]);
+      const win = await getEligibleOpenWindow(target.slug, chosen[0].address, cookie);
+      if (win) {
+        openAt = win.startTime;
+        const kind = win.stageType === 'PUBLIC_SALE' ? 'public'
+          : win.stageType === 'SIGNED_PRESALE' ? 'presale/GTD'
+          : win.stageType === 'MERKLE_PRESALE' ? 'allowlist' : `stage ${win.stageIndex}`;
+        const price = win.priceUnit ? `${win.priceUnit} ${win.symbol}` : 'FREE';
+        stageLabel = `${kind} #${win.stageIndex} · ${price}`;
+      }
+    } catch { /* eligibility resolve failed → try on-chain below */ }
+  }
+  if (openAt == null) {
+    try { openAt = await resolveOpenTime(target); } catch { /* not seadrop */ }
+  }
   const job = addJob({ mode: 'open', whenUnix: openAt, contract: target.contract, chain: target.chain, amount: target.amount || 1, wallets: chosen.length, status: 'watching', chatId: msg.chat.id });
 
   const when = openAt ? fmtWIB(openAt) : '_belum diketahui — poll simulasi on-chain_';
@@ -477,6 +499,7 @@ bot.onText(/^\/(?:mintopen|mo)\s+([\s\S]+)/, guard(async (msg, match) => {
     '━━━━━━━━━━━━━━━━━━━━',
     `📄 \`${target.contract}\``,
     `🔗 ${target.chain}  ·  🎯 × ${job.amount}  ·  👛 ${chosen.length} wallet`,
+    ...(stageLabel ? [`🎟 ${stageLabel}`] : []),
     `⏰ ${when}`,
   ].join('\n'), { parse_mode: 'Markdown' });
 
