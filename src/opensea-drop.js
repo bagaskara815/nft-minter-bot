@@ -77,6 +77,7 @@ export async function getDropStages(slug) {
       label: s.label,
       stageIndex: s.stageIndex,
       startTime: s.startTime ? Math.floor(new Date(s.startTime).getTime() / 1000) : null,
+      endTime: s.endTime ? Math.floor(new Date(s.endTime).getTime() / 1000) : 0,
       priceWei: unit ? BigInt(Math.round(unit * 1e18)) : 0n,
       priceUnit: unit,
       symbol: tok?.symbol || 'ETH',
@@ -158,15 +159,38 @@ export async function buildOpenseaMint({ slug, minterAddress, contract, chain, t
   }
 
   const t = mintAction.transactionSubmissionData;
+  const data = t.data || '0x';
+  const selector = data.slice(0, 10).toLowerCase();
+  // Infer the SeaDrop stage type from the returned selector (osnm-z mapping),
+  // and decode the on-chain stageIndex so callers can verify the server built
+  // the tx for the stage they intended (not a public fallback at a higher price).
+  const stageType = SELECTOR_STAGE[selector] || null;
+  let stageIndex = null;
+  if (stageType === 'PUBLIC_SALE') {
+    stageIndex = 0;
+  } else if (stageType && data.length >= 10 + 9 * 64) {
+    // presale: stageIndex lives at ABI word 8 (offset 4 + 8*32 bytes).
+    try { stageIndex = Number(BigInt('0x' + data.slice(10 + 8 * 64, 10 + 9 * 64))); } catch { stageIndex = null; }
+  }
   return {
     to: t.to,
-    data: t.data,
+    data,
     value: BigInt(t.value || 0),
     networkId: t.chain?.networkId ?? null,
     crossChain: !!mintAction.relayerFulfillment?.crossChain,
     requestId: mintAction.relayerFulfillment?.requestId || null,
+    selector,
+    stageType,
+    stageIndex,
   };
 }
+
+// SeaDrop mint selectors → stage type (from zunmax/osnm-z validate_stage_calldata).
+const SELECTOR_STAGE = {
+  '0x161ac21f': 'PUBLIC_SALE',    // mintPublic
+  '0x4b61cd6f': 'SIGNED_PRESALE', // mintSigned (GTD / allowlist w/ server signature)
+  '0x4300a4e6': 'MERKLE_PRESALE', // mintAllowList (on-chain merkle)
+};
 
 // Structured error codes OpenSea returns when a mint tx can't be built. These
 // distinguish "you're not eligible / out of allocation" (definitive) from
@@ -234,4 +258,45 @@ export async function getDropEligibility(slug, minterAddress, cookie) {
   });
   const authed = stages.some((s) => s.isEligible !== null);
   return { typename: drop.__typename, stages, authed, minted: drop.minterQuantityMinted ?? null };
+}
+
+// Resolve the earliest stage this wallet is actually eligible for, by
+// cross-referencing MintModuleQuery (start/end/price per stage) with the
+// authenticated DropEligibilityQuery (isEligible per stage). This is what /mo
+// must wait for — NOT the public stage — so an eligible GTD/presale that opens
+// earlier (and is usually cheaper) is targeted instead of the public fallback.
+//
+// Returns { stageIndex, stageType, startTime, endTime, priceUnit, symbol,
+// maxPerWallet } for the earliest eligible stage, or null when the wallet is
+// eligible for nothing / the session wasn't accepted.
+export async function getEligibleOpenWindow(slug, minterAddress, cookie) {
+  const [mod, elig] = await Promise.all([
+    getDropStages(slug),
+    getDropEligibility(slug, minterAddress, cookie),
+  ]);
+  if (!mod || !elig || !elig.authed) return null;
+
+  // Index stage timing/price by stageIndex from MintModuleQuery.
+  const byIndex = new Map(mod.stages.map((s) => [String(s.stageIndex), s]));
+
+  const eligible = elig.stages
+    .filter((s) => s.isEligible === true)
+    .map((s) => {
+      const m = byIndex.get(String(s.stageIndex)) || {};
+      return {
+        stageIndex: s.stageIndex,
+        stageType: s.stageType || m.stageType || null,
+        startTime: m.startTime ?? null,
+        endTime: m.endTime ?? 0,
+        priceUnit: s.priceUnit ?? m.priceUnit ?? null,
+        symbol: s.symbol || m.symbol || 'ETH',
+        maxPerWallet: s.maxPerWallet ?? m.maxPerWallet ?? null,
+      };
+    })
+    .filter((s) => s.startTime != null);
+  if (!eligible.length) return null;
+
+  // Earliest start wins; tie-break cheapest.
+  eligible.sort((a, b) => (a.startTime - b.startTime) || ((a.priceUnit ?? 0) - (b.priceUnit ?? 0)));
+  return eligible[0];
 }

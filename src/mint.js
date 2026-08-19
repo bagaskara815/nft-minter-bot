@@ -348,7 +348,11 @@ async function mintOpenseaDrop(target, signer, provider, amount, onEvent) {
     }
   }
 
-  const fnLabel = `opensea drop${built.crossChain ? ' (relayer)' : ''} × ${amount}`;
+  const stageLabel = built.stageType === 'PUBLIC_SALE' ? 'public'
+    : built.stageType === 'SIGNED_PRESALE' ? 'presale/GTD'
+    : built.stageType === 'MERKLE_PRESALE' ? 'allowlist'
+    : built.stageType || '?';
+  const fnLabel = `opensea ${stageLabel}${built.stageIndex != null ? ` #${built.stageIndex}` : ''}${built.crossChain ? ' (relayer)' : ''} × ${amount}`;
   onEvent({ stage: 'detected', fn: fnLabel, price: ethers.formatEther(built.value) });
 
   const txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };

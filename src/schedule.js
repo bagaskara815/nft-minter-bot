@@ -4,6 +4,7 @@ import { getProvider } from './chains.js';
 import { mintOne, mintMany } from './mint.js';
 import { detectSeadrop, getPublicDrop } from './seadrop.js';
 import { getSessionCookies } from './opensea-auth.js';
+import { getEligibleOpenWindow } from './opensea-drop.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -113,10 +114,30 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
   const attemptMint = opts.mintOne ?? mintOne;
   const attemptMany = opts.mintMany ?? mintMany;
 
-  // Resolve the launch window. Prefer an explicit start (scheduled /ma); else
-  // read it on-chain. endTime lets us detect an already-ended drop up front.
+  // Resolve the launch window. Prefer an explicit start (scheduled /ma). For
+  // OpenSea drops, resolve the earliest stage THIS wallet is eligible for
+  // (GTD/presale usually opens earlier and cheaper than public) via an
+  // authenticated session — not the public stage. Falls back to the on-chain
+  // Seadrop window for non-OpenSea / when eligibility can't be resolved.
   let openAt = opts.startAtUnix ?? null;
   let endAt = opts.endAtUnix ?? 0;
+  let eligibleStage = null;
+  if (openAt == null && target.source === 'opensea' && target.slug) {
+    try {
+      const cookie = await getSessionCookies(list[0]);
+      const win = await getEligibleOpenWindow(target.slug, list[0].address, cookie);
+      if (win) {
+        eligibleStage = win;
+        openAt = win.startTime;
+        endAt = win.endTime;
+        const label = win.stageType === 'PUBLIC_SALE' ? 'public'
+          : win.stageType === 'SIGNED_PRESALE' ? 'presale/GTD'
+          : win.stageType === 'MERKLE_PRESALE' ? 'allowlist' : `stage ${win.stageIndex}`;
+        const priceTxt = win.priceUnit ? `${win.priceUnit} ${win.symbol}` : 'FREE';
+        onEvent({ stage: 'eligible_stage', stageIndex: win.stageIndex, stageType: win.stageType, label, price: priceTxt, openAt: win.startTime, wib: fmtWIB(win.startTime) });
+      }
+    } catch { /* eligibility resolve failed → fall through to on-chain */ }
+  }
   if (openAt == null) {
     try {
       const win = await resolveOpenWindow(target);
