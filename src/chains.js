@@ -15,6 +15,8 @@ export const RPCS = {
   peaq: process.env.RPC_PEAQ || 'https://peaq-rpc.publicnode.com',
   // Robinhood Chain (chainId 4663).
   robinhood: process.env.RPC_ROBINHOOD || 'https://robinhood-rpc.publicnode.com',
+  // Ink chain (chainId 57073).
+  ink: process.env.RPC_INK || 'https://ink.api.pocket.network',
 };
 
 export const CHAIN_IDS = {
@@ -29,6 +31,7 @@ export const CHAIN_IDS = {
   bera: 80094,
   peaq: 3338,
   robinhood: 4663,
+  ink: 57073,
 };
 
 const EXPLORERS = {
@@ -43,6 +46,7 @@ const EXPLORERS = {
   bera: 'https://berascan.com/tx/',
   peaq: 'https://peaq.subscan.io/tx/',
   robinhood: 'https://robinhoodchain.blockscout.com/tx/',
+  ink: 'https://explorer.inkonchain.com/tx/',
 };
 
 export const explorerUrl = (chain, hash) => (EXPLORERS[chain] || '') + hash;
