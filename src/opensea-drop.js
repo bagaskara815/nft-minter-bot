@@ -48,19 +48,48 @@ const HEADERS = {
   'user-agent': 'Mozilla/5.0',
 };
 
-// Issue a persisted GraphQL query (GET, like the frontend). Returns parsed
-// `data`. Throws on transport error; GraphQL-level errors are left in the
-// payload for the caller to interpret (some are partial/UNAUTHORIZED).
+// Issue a persisted GraphQL query (GET, like the frontend). On
+// PERSISTED_QUERY_NOT_FOUND (OpenSea redeploys rotate hashes), re-register the
+// query via APQ — POST the full query text once with its sha256, then retry
+// hash-only. Returns parsed JSON; GraphQL errors stay in the payload.
+const QUERY_TEXTS = {
+  MintActionTimelineQuery: `query MintActionTimelineQuery($address: Address! $fromAssets: [AssetQuantityInput!]! $toAssets: [AssetQuantityInput!]! $recipient: Address) { swap(address: $address fromAssets: $fromAssets toAssets: $toAssets recipient: $recipient action: MINT) { actions { __typename ... on TransactionAction { transactionSubmissionData { to data value chain { networkId identifier } } } } errors { __typename } } }`,
+  MintModuleQuery: `query MintModuleQuery($collectionSlug: String!) { dropBySlug(slug: $collectionSlug) { __typename stages { __typename stageType stageIndex startTime endTime maxTotalMintableByWallet price { token { unit symbol contractAddress chain { identifier } } } label } } }`,
+  DropEligibilityQuery: `query DropEligibilityQuery($collectionSlug: String! $address: Address!) { dropBySlug(slug: $collectionSlug) { __typename minterQuantityMinted stages { __typename stageType stageIndex isEligible eligibleMinterAddress maxTotalMintableByWallet eligibleMaxTotalMintableByWallet eligiblePrice { token { unit symbol } } } } }`,
+  MintQuery: `query MintQuery($slug: String!) { collectionBySlug(slug: $slug) { __typename name isVerified address chain { identifier } imageUrl } }`,
+};
+
 async function persistedQuery(operationName, hash, variables, cookie) {
+  const headers = cookie ? { ...HEADERS, cookie } : HEADERS;
+  const ext = JSON.stringify({ persistedQuery: { sha256Hash: hash, version: 1 } });
   const url =
     `${GQL}?app_id=os2-web&operationName=${operationName}` +
     `&variables=${encodeURIComponent(JSON.stringify(variables))}` +
-    `&extensions=${encodeURIComponent(JSON.stringify({ persistedQuery: { sha256Hash: hash, version: 1 } }))}`;
-  const headers = cookie ? { ...HEADERS, cookie } : HEADERS;
+    `&extensions=${encodeURIComponent(ext)}`;
   const r = await fetch(url, { headers });
-  if (!r.ok) throw new Error(`opensea gql ${operationName} ${r.status}`);
-  const j = await r.json();
-  return j;
+  if (r.ok) return await r.json();
+
+  // Hash may be retired (frontend redeploy). Fall back to APQ registration:
+  // send the full query text with our computed sha256; the server registers it
+  // and executes in the same call. Subsequent calls go back to hash-only GET.
+  const body = await r.json().catch(() => ({}));
+  const notFound = body?.errors?.some?.((e) => e?.extensions?.code === 'PERSISTED_QUERY_NOT_FOUND');
+  const text = QUERY_TEXTS[operationName];
+  if (!notFound || !text) throw new Error(`opensea gql ${operationName} ${r.status}`);
+  const { createHash } = await import('node:crypto');
+  const computed = createHash('sha256').update(text).digest('hex');
+  const pr = await fetch(GQL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      operationName,
+      query: text,
+      variables,
+      extensions: { persistedQuery: { version: 1, sha256Hash: computed } },
+    }),
+  });
+  if (!pr.ok) throw new Error(`opensea gql ${operationName} APQ ${pr.status}`);
+  return await pr.json();
 }
 
 // Fetch the drop stages for a collection slug. Returns
