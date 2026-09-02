@@ -302,6 +302,7 @@ export async function getDropEligibility(slug, minterAddress, cookie) {
     const tok = s.eligiblePrice?.token;
     return {
       stageIndex: s.stageIndex,
+      uuid: s.uuid || null,
       stageType: s.stageType || null,
       isEligible: s.isEligible,
       eligibleMinterAddress: s.eligibleMinterAddress || null,
@@ -320,11 +321,17 @@ export async function getDropEligibility(slug, minterAddress, cookie) {
   const ase = drop.accountStageEligibility || null;
   let otherEligibleByStage = null;
   if (ase?.wallets?.length) {
+    // wallets[].stages identify the stage by dropStageUuid (NOT stageIndex) —
+    // build uuid→stageIndex from the top-level stages list first.
+    const byUuid = new Map(stages.filter((s) => s.uuid).map((s) => [s.uuid, s.stageIndex]));
     otherEligibleByStage = {};
     for (const wl of ase.wallets) {
       if (!wl.address || wl.address.toLowerCase() === String(minterAddress).toLowerCase()) continue;
       for (const st of wl.stages || []) {
-        if (st.isEligible) otherEligibleByStage[st.stageIndex] = (otherEligibleByStage[st.stageIndex] || 0) + 1;
+        if (!st.isEligible) continue;
+        const idx = byUuid.get(st.dropStageUuid);
+        if (idx == null) continue;
+        otherEligibleByStage[idx] = (otherEligibleByStage[idx] || 0) + 1;
       }
     }
   }
