@@ -55,7 +55,7 @@ const HEADERS = {
 const QUERY_TEXTS = {
   MintActionTimelineQuery: `query MintActionTimelineQuery($address: Address! $fromAssets: [AssetQuantityInput!]! $toAssets: [AssetQuantityInput!]! $recipient: Address) { swap(address: $address fromAssets: $fromAssets toAssets: $toAssets recipient: $recipient action: MINT) { actions { __typename ... on TransactionAction { transactionSubmissionData { to data value chain { networkId identifier } } } } errors { __typename } } }`,
   MintModuleQuery: `query MintModuleQuery($collectionSlug: String!) { dropBySlug(slug: $collectionSlug) { __typename stages { __typename stageType stageIndex startTime endTime maxTotalMintableByWallet price { token { unit symbol contractAddress chain { identifier } } } label } } }`,
-  DropEligibilityQuery: `query DropEligibilityQuery($collectionSlug: String! $address: Address!) { dropBySlug(slug: $collectionSlug) { __typename minterQuantityMinted stages { __typename stageType stageIndex isEligible eligibleMinterAddress maxTotalMintableByWallet eligibleMaxTotalMintableByWallet eligiblePrice { token { unit symbol } } } } }`,
+  DropEligibilityQuery: `query DropEligibilityQuery($collectionSlug: String!, $address: Address!) { dropBySlug(slug: $collectionSlug) { __typename ... on Erc721SeaDropV1 { minterQuantityMinted(minter: $address) } accountStageEligibility { walletCount allowlistedWalletCount wallets { address quantityMinted stages { dropStageUuid isEligible maxTotalMintableByWallet } } } stages { uuid stageType stageIndex isEligible eligibleMinterAddress maxTotalMintableByWallet allowlistMemberCount eligibleMaxTotalMintableByWallet eligiblePrice { token { unit symbol } } } } }`,
   MintQuery: `query MintQuery($slug: String!) { collectionBySlug(slug: $slug) { __typename name isVerified address chain { identifier } imageUrl } }`,
 };
 
@@ -78,6 +78,29 @@ async function persistedQuery(operationName, hash, variables, cookie) {
   if (!notFound || !text) throw new Error(`opensea gql ${operationName} ${r.status}`);
   const { createHash } = await import('node:crypto');
   const computed = createHash('sha256').update(text).digest('hex');
+  const pr = await fetch(GQL, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      operationName,
+      query: text,
+      variables,
+      extensions: { persistedQuery: { version: 1, sha256Hash: computed } },
+    }),
+  });
+  if (!pr.ok) throw new Error(`opensea gql ${operationName} APQ ${pr.status}`);
+  return await pr.json();
+}
+
+// Run a query with OUR OWN text+hash via APQ directly (skip the pinned hash).
+// Use when we need fields the frontend's pinned-hash version doesn't return
+// (e.g. the new allowlist-count fields) — the server registers our hash.
+async function apqQuery(operationName, variables, cookie) {
+  const text = QUERY_TEXTS[operationName];
+  if (!text) throw new Error(`no query text for ${operationName}`);
+  const { createHash } = await import('node:crypto');
+  const computed = createHash('sha256').update(text).digest('hex');
+  const headers = cookie ? { ...HEADERS, cookie } : HEADERS;
   const pr = await fetch(GQL, {
     method: 'POST',
     headers,
@@ -264,9 +287,11 @@ export async function probeOpenseaMint(args) {
 // UNAUTHORIZED. Returns { stages:[{ stageIndex, stageType, isEligible,
 // eligibleMinterAddress, maxPerWallet, priceUnit, symbol }], authed } or null.
 export async function getDropEligibility(slug, minterAddress, cookie) {
-  const j = await persistedQuery(
+  // Use our own APQ-registered query so the new count fields
+  // (accountStageEligibility + allowlistMemberCount) are always present —
+  // the frontend's pinned hash may still return the older shape.
+  const j = await apqQuery(
     'DropEligibilityQuery',
-    HASHES.dropEligibility,
     { address: minterAddress, collectionSlug: slug },
     cookie,
   );
@@ -283,10 +308,35 @@ export async function getDropEligibility(slug, minterAddress, cookie) {
       maxPerWallet: s.eligibleMaxTotalMintableByWallet ?? s.maxTotalMintableByWallet ?? null,
       priceUnit: tok?.unit ?? null,
       symbol: tok?.symbol || 'ETH',
+      // New OpenSea field: how many wallets are in this stage's allowlist
+      // (null on public stage). Shown as the "+N wallets eligible" style stat.
+      allowlistMemberCount: s.allowlistMemberCount ?? null,
     };
   });
   const authed = stages.some((s) => s.isEligible !== null);
-  return { typename: drop.__typename, stages, authed, minted: drop.minterQuantityMinted ?? null };
+  // accountStageEligibility: the drop-wide wallet list. `allowlistedWalletCount`
+  // is OpenSea's own number; the UI's per-stage "+N other wallets" count is
+  // derived by filtering that list — we expose both plus the derived map.
+  const ase = drop.accountStageEligibility || null;
+  let otherEligibleByStage = null;
+  if (ase?.wallets?.length) {
+    otherEligibleByStage = {};
+    for (const wl of ase.wallets) {
+      if (!wl.address || wl.address.toLowerCase() === String(minterAddress).toLowerCase()) continue;
+      for (const st of wl.stages || []) {
+        if (st.isEligible) otherEligibleByStage[st.stageIndex] = (otherEligibleByStage[st.stageIndex] || 0) + 1;
+      }
+    }
+  }
+  return {
+    typename: drop.__typename,
+    stages,
+    authed,
+    minted: drop.minterQuantityMinted ?? null,
+    walletCount: ase?.walletCount ?? null,
+    allowlistedWalletCount: ase?.allowlistedWalletCount ?? null,
+    otherEligibleByStage,
+  };
 }
 
 // Resolve the earliest stage this wallet is actually eligible for, by

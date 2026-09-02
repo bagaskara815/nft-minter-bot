@@ -205,11 +205,21 @@ async function runCheck(msg, rawInput) {
             continue;
           }
           const ok = elig.stages.filter((s) => s.isEligible);
+          // Drop-wide wallet stats (new OpenSea accountStageEligibility data).
+          const stats = [];
+          if (elig.allowlistedWalletCount != null) stats.push(`👥 ${elig.allowlistedWalletCount} wallet di allowlist`);
+          if (elig.walletCount != null) stats.push(`📋 ${elig.walletCount} wallet terlacak`);
+          if (stats.length) lines.push(`   ${stats.join('  ·  ')}`);
           if (ok.length) {
             const parts = ok.map((s) => {
               const label = s.stageType === 'PUBLIC_SALE' ? 'public' : s.stageType === 'SIGNED_PRESALE' ? 'presale/GTD' : `stage ${s.stageIndex}`;
               const price = s.priceUnit != null ? (s.priceUnit ? `${s.priceUnit} ${s.symbol}` : 'FREE') : '';
-              return `${label}${price ? ` (${price})` : ''}`;
+              // Per-stage competition: allowlist members vs other tracked wallets.
+              const bits = [];
+              if (s.allowlistMemberCount != null) bits.push(`allowlist ${s.allowlistMemberCount}`);
+              const others = elig.otherEligibleByStage?.[s.stageIndex];
+              if (others != null) bits.push(`+${others} wallet lain eligible`);
+              return `${label}${price ? ` (${price})` : ''}${bits.length ? ` — ${bits.join(', ')}` : ''}`;
             });
             lines.push(`✅ \`${w.address.slice(0, 10)}…\`  eligible: ${parts.join(', ')}`);
           } else {
