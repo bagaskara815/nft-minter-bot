@@ -54,7 +54,7 @@ const HEADERS = {
 // hash-only. Returns parsed JSON; GraphQL errors stay in the payload.
 const QUERY_TEXTS = {
   MintActionTimelineQuery: `query MintActionTimelineQuery($address: Address! $fromAssets: [AssetQuantityInput!]! $toAssets: [AssetQuantityInput!]! $recipient: Address) { swap(address: $address fromAssets: $fromAssets toAssets: $toAssets recipient: $recipient action: MINT) { actions { __typename ... on TransactionAction { transactionSubmissionData { to data value chain { networkId identifier } } } } errors { __typename } } }`,
-  MintModuleQuery: `query MintModuleQuery($collectionSlug: String!) { dropBySlug(slug: $collectionSlug) { __typename stages { __typename stageType stageIndex startTime endTime maxTotalMintableByWallet price { token { unit symbol contractAddress chain { identifier } } } label } } }`,
+  MintModuleQuery: `query MintModuleQuery($collectionSlug: String!) { dropBySlug(slug: $collectionSlug) { __typename stages { __typename stageType stageIndex startTime endTime maxTotalMintableByWallet allowlistMemberCount price { token { unit symbol contractAddress chain { identifier } } } label } } }`,
   DropEligibilityQuery: `query DropEligibilityQuery($collectionSlug: String!, $address: Address!) { dropBySlug(slug: $collectionSlug) { __typename ... on Erc721SeaDropV1 { minterQuantityMinted(minter: $address) } accountStageEligibility { walletCount allowlistedWalletCount wallets { address quantityMinted stages { dropStageUuid isEligible maxTotalMintableByWallet } } } stages { uuid stageType stageIndex isEligible eligibleMinterAddress maxTotalMintableByWallet allowlistMemberCount eligibleMaxTotalMintableByWallet eligiblePrice { token { unit symbol } } } } }`,
   MintQuery: `query MintQuery($slug: String!) { collectionBySlug(slug: $slug) { __typename name isVerified address chain { identifier } imageUrl } }`,
 };
@@ -119,7 +119,9 @@ async function apqQuery(operationName, variables, cookie) {
 // { typename, stages:[{ label, stageIndex, startTime, priceWei, symbol, currency, chain, maxPerWallet }] }
 // or null when the slug isn't an OpenSea drop.
 export async function getDropStages(slug) {
-  const j = await persistedQuery('MintModuleQuery', HASHES.mintModule, { collectionSlug: slug });
+  // APQ with our own text: the pinned hash serves the older shape without
+  // allowlistMemberCount.
+  const j = await apqQuery('MintModuleQuery', { collectionSlug: slug });
   const drop = j?.data?.dropBySlug;
   if (!drop) return null;
   const stages = (drop.stages || []).map((s) => {
@@ -137,6 +139,7 @@ export async function getDropStages(slug) {
       chain: tok?.chain?.identifier || null,
       maxPerWallet: s.maxTotalMintableByWallet ?? null,
       stageType: s.stageType || null,
+      allowlistMemberCount: s.allowlistMemberCount ?? null,
     };
   });
   return { typename: drop.__typename, stages };

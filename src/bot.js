@@ -190,7 +190,7 @@ async function runCheck(msg, rawInput) {
         else if (s.stageType === 'SIGNED_PRESALE' || /presale|signed/.test(lbl)) tag = '🔏';
         else if (/gtd|allowlist|allow list|holder|wl\b|whitelist/.test(lbl)) tag = '🎫';
         else tag = '•';
-        lines.push(`  ${tag} stage ${s.stageIndex}: ${s.label} · ${price} · max ${s.maxPerWallet ?? '?'} · ${when}`);
+        lines.push(`  ${tag} stage ${s.stageIndex}: ${s.label} · ${price} · max ${s.maxPerWallet ?? '?'}${s.allowlistMemberCount != null ? ` · 👥 ${s.allowlistMemberCount}` : ''} · ${when}`);
       }
       // Per-wallet eligibility via DropEligibilityQuery (authed session with the
       // connected-account hint cookie). This resolves per-stage eligibility even
