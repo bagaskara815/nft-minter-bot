@@ -180,7 +180,7 @@ async function runCheck(msg, rawInput) {
       lines.push('', '🎬 *Stages (WIB)*');
       for (const s of drop.stages) {
         const price = s.priceUnit ? `${s.priceUnit} ${s.symbol}` : 'FREE';
-        const when = s.startTime ? (s.startTime > now ? `buka ${fmtWIB(s.startTime)}` : '🟢 buka') : '—';
+        const when = s.startTime ? (s.startTime > now ? fmtWIB(s.startTime) : '*🟢 BUKA*') : '—';
         // MintModuleQuery does not return stageType (that's auth-gated in
         // DropEligibilityQuery), so infer the icon from stageType when present,
         // else from the label text (Public / GTD / presale / allowlist).
@@ -190,7 +190,15 @@ async function runCheck(msg, rawInput) {
         else if (s.stageType === 'SIGNED_PRESALE' || /presale|signed/.test(lbl)) tag = '🔏';
         else if (/gtd|allowlist|allow list|holder|wl\b|whitelist/.test(lbl)) tag = '🎫';
         else tag = '•';
-        lines.push(`  ${tag} stage ${s.stageIndex}: ${s.label} · ${price} · max ${s.maxPerWallet ?? '?'}${s.allowlistMemberCount != null ? ` · 👥 ${s.allowlistMemberCount}` : ''} · ${when}`);
+        // Two-line card: header (icon · name · access stats), footer (price ·
+        // max · window). Keeps long labels/timestamps from wrapping mid-token.
+        const access = [];
+        if (s.maxPerWallet != null) access.push(`max ${s.maxPerWallet}/wallet`);
+        if (s.allowlistMemberCount != null) access.push(`👥 ${s.allowlistMemberCount}`);
+        lines.push(
+          `${tag} *${s.label || `stage ${s.stageIndex}`}*`,
+          `   ${price}  ·  ${access.join('  ·  ') || 'tanpa batas'}  ·  ${when}`,
+        );
       }
       // Per-wallet eligibility via DropEligibilityQuery (authed session with the
       // connected-account hint cookie). This resolves per-stage eligibility even
@@ -221,7 +229,7 @@ async function runCheck(msg, rawInput) {
               if (others != null) bits.push(`+${others} wallet lain eligible`);
               return `${label}${price ? ` (${price})` : ''}${bits.length ? ` — ${bits.join(', ')}` : ''}`;
             });
-            lines.push(`✅ \`${w.address.slice(0, 10)}…\`  eligible: ${parts.join(', ')}`);
+            lines.push(`✅ \`${w.address.slice(0, 10)}…\`  eligible:`, ...parts.map((p) => `  - ${p}`));
           } else {
             lines.push(`⚪ \`${w.address.slice(0, 10)}…\`  tidak eligible stage apa pun`);
           }
