@@ -165,17 +165,31 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
       onEvent({ stage: 'waiting_open', openAt, wib: fmtWIB(openAt) });
       await sleep(chunk);
 
-      // Re-probe only when we resolved the window on-chain (no explicit start).
+      // Re-probe the SAME source the window came from, so an OpenSea
+      // eligibility-anchored target never falls back to the on-chain PUBLIC
+      // window (that would silently jump the wait from GTD to public open).
       // A creator can move the start; follow it. Best-effort — keep the old
       // openAt if the probe fails transiently.
       if (opts.startAtUnix == null) {
         try {
-          const win = await resolveOpenWindow(target);
-          if (win) {
-            if (win.endTime > 0 && nowSec() >= win.endTime) {
-              throw new Error(`stage sudah berakhir (tutup ${fmtWIB(win.endTime)}) — tidak ada yang bisa di-mint`);
+          if (eligibleStage) {
+            const cookie = await getSessionCookies(list[0]);
+            const win = await getEligibleOpenWindow(target.slug, list[0].address, cookie);
+            if (win) {
+              if (win.endTime > 0 && nowSec() >= win.endTime) {
+                throw new Error(`stage sudah berakhir (tutup ${fmtWIB(win.endTime)}) — tidak ada yang bisa di-mint`);
+              }
+              eligibleStage = win;
+              openAt = win.startTime; endAt = win.endTime;
             }
-            openAt = win.startTime; endAt = win.endTime;
+          } else {
+            const win = await resolveOpenWindow(target);
+            if (win) {
+              if (win.endTime > 0 && nowSec() >= win.endTime) {
+                throw new Error(`stage sudah berakhir (tutup ${fmtWIB(win.endTime)}) — tidak ada yang bisa di-mint`);
+              }
+              openAt = win.startTime; endAt = win.endTime;
+            }
           }
         } catch (e) {
           if (/sudah berakhir/.test(e.message)) throw e;
