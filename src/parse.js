@@ -16,6 +16,7 @@ export function chainSlug(s) {
     bera: 'bera', berachain: 'bera',
     peaq: 'peaq',
     'robinhood-chain': 'robinhood', robinhood: 'robinhood', rhoc: 'robinhood',
+    'arc-network': 'arc', arc: 'arc', circle: 'arc',
   };
   return map[s.toLowerCase()] || s.toLowerCase();
 }

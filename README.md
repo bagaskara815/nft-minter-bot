@@ -9,7 +9,7 @@ Auto-detects the mint path across OpenSea Seadrop, OpenSea Drops (OS2), Scatter.
 ![Node](https://img.shields.io/badge/node-%3E%3D18-3C873A?logo=node.js&logoColor=white)
 ![ethers](https://img.shields.io/badge/ethers-6.13-2535A0)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-26A5E4?logo=telegram&logoColor=white)
-![Chains](https://img.shields.io/badge/chains-12-627EEA)
+![Chains](https://img.shields.io/badge/chains-13-627EEA)
 ![Platforms](https://img.shields.io/badge/platforms-Seadrop%20%C2%B7%20OpenSea%20%C2%B7%20Scatter-orange)
 ![License](https://img.shields.io/badge/private-use-lightgrey)
 
@@ -78,6 +78,7 @@ Auto-detects the mint path across OpenSea Seadrop, OpenSea Drops (OS2), Scatter.
 | peaq | `peaq` | `3338` | peaq.subscan.io |
 | **Robinhood** | `robinhood` | `4663` | robinhoodchain.blockscout.com |
 | Ink | `ink` | `57073` | explorer.inkonchain.com |
+| Arc | `arc` | `5042` | arc-scan.org |
 
 > Every RPC is overridable with an `RPC_*` env var — see [`.env.example`](.env.example).
 
@@ -315,5 +316,6 @@ parse → resolve (slug/URL/contract)
 - **OpenSea Drops** persisted-query hashes can change on frontend redeploys — override via `OS_HASH_*` env vars if `/check` or minting starts failing.
 - **Robinhood Chain** defaults to `https://robinhood-rpc.publicnode.com` (override via `RPC_ROBINHOOD`). In Indonesia the official `rpc.mainnet.chain.robinhood.com` endpoint can be blocked by ISP DNS; the public node avoids that.
 - **Ink** (Kraken's Superchain L2) defaults to `https://ink.api.pocket.network` (override via `RPC_INK`).
+- **Arc** (Circle's EVM L2, chainId `5042`) — native gas is **USDC** (18 decimals), so balances/prices report in USDC, not ETH. Default RPC `https://rpc.arc-scan.org` (occasionally 503s; official fallback `https://rpc.mainnet.arc.io` — set `RPC_ARC`).
 - **Jobs are in-memory** — a bot restart clears scheduled/watching jobs.
 - **`EFATAL: AggregateError`** on startup usually means the bot cannot reach `api.telegram.org` (ISP block / no network), not a code bug.

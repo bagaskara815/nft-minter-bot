@@ -116,7 +116,7 @@ bot.onText(/^\/start$|^\/help$/, guard(async (msg) => {
     '⏱ *Waktu*  ISO `2026-08-12T14:00`, unix, `in 5m`, `30s`, `2h`, `HH:MM` (WIB)',
     '👛 *Wallets*  default primary. `wallets:all` · `wallets:3` · `wallets:1,2`',
     '',
-    '🔗 *Chains*  ethereum · base · polygon · arbitrum · optimism · zora · bsc · avalanche · bera · peaq · robinhood',
+    '🔗 *Chains*  ethereum · base · polygon · arbitrum · optimism · zora · bsc · avalanche · bera · peaq · robinhood · ink · arc',
     '🧠 Auto-detect: mint fn · harga · gas · Seadrop v1/v2 · allowlist',
   ].join('\n'), { parse_mode: 'Markdown' });
 }));

@@ -34,6 +34,7 @@ const OS_CHAIN = {
   avalanche: 'avalanche',
   bera: 'bera_chain',
   robinhood: 'robinhood',
+  arc: 'arc',
 };
 
 export function osChain(chainKey) {
