@@ -203,6 +203,10 @@ async function runCheck(msg, rawInput) {
       // Per-wallet eligibility via DropEligibilityQuery (authed session with the
       // connected-account hint cookie). This resolves per-stage eligibility even
       // BEFORE a stage opens — no mint-probe needed.
+      // stageIndex → real stage label from MintModuleQuery ("GTD c00l", "FCFS
+      // c00l", …). DropEligibilityQuery has no label field; both queries key
+      // the same drop stages, so join here (same approach as getEligibleOpenWindow).
+      const stageLabels = new Map(drop.stages.map((s) => [String(s.stageIndex), s.label]));
       lines.push('', '━━━━━━━━━━━━━━━━━━━━', `👛 *Eligibility — ${chosen.length} wallet*`);
       for (const w of chosen) {
         try {
@@ -220,7 +224,9 @@ async function runCheck(msg, rawInput) {
           if (stats.length) lines.push(`   ${stats.join('  ·  ')}`);
           if (ok.length) {
             const parts = ok.map((s) => {
-              const label = s.stageType === 'PUBLIC_SALE' ? 'public' : s.stageType === 'SIGNED_PRESALE' ? 'presale/GTD' : `stage ${s.stageIndex}`;
+              // Prefer the drop's own stage name; fall back to the type bucket.
+              const label = stageLabels.get(String(s.stageIndex))
+                || (s.stageType === 'PUBLIC_SALE' ? 'public' : s.stageType === 'SIGNED_PRESALE' ? 'presale/GTD' : `stage ${s.stageIndex}`);
               const price = s.priceUnit != null ? (s.priceUnit ? `${s.priceUnit} ${s.symbol}` : 'FREE') : '';
               // Per-stage competition: allowlist members vs other tracked wallets.
               const bits = [];
