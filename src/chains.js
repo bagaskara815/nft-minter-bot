@@ -18,7 +18,7 @@ export const RPCS = {
   // Ink chain (chainId 57073).
   ink: process.env.RPC_INK || 'https://ink.api.pocket.network',
   // Arc — Circle's EVM L2 (chainId 5042), USDC gas.
-  arc: process.env.RPC_ARC || 'https://rpc.arc-scan.org',
+  arc: process.env.RPC_ARC || 'https://rpc.mainnet.arc.io',
 };
 
 export const CHAIN_IDS = {
@@ -50,7 +50,7 @@ const EXPLORERS = {
   peaq: 'https://peaq.subscan.io/tx/',
   robinhood: 'https://robinhoodchain.blockscout.com/tx/',
   ink: 'https://explorer.inkonchain.com/tx/',
-  arc: 'https://arc-scan.org/tx/',
+  arc: 'https://explorer.arc.io/tx/',
 };
 
 export const explorerUrl = (chain, hash) => (EXPLORERS[chain] || '') + hash;
