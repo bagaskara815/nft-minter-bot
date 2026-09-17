@@ -17,7 +17,10 @@ const SEADROP_ABI = [
 
 const TOKEN_ABI = [
   'function maxSupply() view returns (uint256)',
+  'function MAX_SUPPLY() view returns (uint256)',
+  'function maxTotalSupply() view returns (uint256)',
   'function totalSupply() view returns (uint256)',
+  'function totalMinted() view returns (uint256)',
   'function baseURI() view returns (string)',
 ];
 
@@ -110,9 +113,19 @@ export async function getFeeRecipient(seadropAddr, nftContract, provider) {
 // Token-contract readiness snapshot (maxSupply/baseURI/totalSupply).
 export async function tokenStatus(nftContract, provider) {
   const c = new ethers.Contract(nftContract, TOKEN_ABI, provider);
-  const out = {};
-  try { out.maxSupply = await c.maxSupply(); } catch { out.maxSupply = null; }
-  try { out.totalSupply = await c.totalSupply(); } catch { out.totalSupply = null; }
+  const out = { maxSupply: null, totalSupply: null, baseURI: null };
+  for (const fn of ['maxSupply', 'MAX_SUPPLY', 'maxTotalSupply']) {
+    try {
+      const v = await c[fn]();
+      if (typeof v === 'bigint') { out.maxSupply = v; break; }
+    } catch { /* continue */ }
+  }
+  for (const fn of ['totalSupply', 'totalMinted']) {
+    try {
+      const v = await c[fn]();
+      if (typeof v === 'bigint') { out.totalSupply = v; break; }
+    } catch { /* continue */ }
+  }
   try { out.baseURI = await c.baseURI(); } catch { out.baseURI = null; }
   return out;
 }

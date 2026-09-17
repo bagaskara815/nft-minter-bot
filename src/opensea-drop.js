@@ -165,6 +165,7 @@ export async function getCollectionMeta(slug) {
     discord: null,
     telegram: null,
     owner: null,
+    totalSupply: null,
   };
 
   // Enrich with external links from REST v2 when an API key is available.
@@ -180,6 +181,9 @@ export async function getCollectionMeta(slug) {
         meta.telegram = d.telegram_url || null;
         meta.owner = d.owner || null;
         if (d.name) meta.name = d.name;
+        if (d.total_supply != null) {
+          try { meta.totalSupply = BigInt(d.total_supply); } catch { /* ignore */ }
+        }
       }
     } catch { /* REST enrichment is best-effort */ }
   }

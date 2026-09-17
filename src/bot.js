@@ -147,6 +147,22 @@ bot.onText(/^\/wallet$/, guard(async (msg) => {
   await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown' });
 }));
 
+// Format token supply compactly (e.g. "10,000 (sold out)", "10,000 (3,500 minted)", "10,000").
+function fmtSupply(maxSup, totalSup) {
+  let max = null;
+  let tot = null;
+  try { if (maxSup != null) max = BigInt(maxSup); } catch { /* ignore */ }
+  try { if (totalSup != null) tot = BigInt(totalSup); } catch { /* ignore */ }
+  if (max == null && tot == null) return null;
+  if (max != null && tot != null) {
+    return (max > 0n && tot >= max)
+      ? `${max.toLocaleString('en-US')} (sold out)`
+      : `${max.toLocaleString('en-US')} (${tot.toLocaleString('en-US')} minted)`;
+  }
+  if (max != null) return `${max.toLocaleString('en-US')}`;
+  return `${tot.toLocaleString('en-US')} minted`;
+}
+
 // Run the collection-check flow for a raw target string (used by /check and by
 // the bare-URL auto-listener). `rawInput` may include a wallet spec.
 async function runCheck(msg, rawInput) {
@@ -169,7 +185,10 @@ async function runCheck(msg, rawInput) {
     const drop = await getDropStages(target.slug).catch(() => null);
     if (drop && drop.stages.length) {
       const now = Math.floor(Date.now() / 1000);
-      const meta = await getCollectionMeta(target.slug).catch(() => null);
+      const [meta, st] = await Promise.all([
+        getCollectionMeta(target.slug).catch(() => null),
+        tokenStatus(target.contract, provider).catch(() => null),
+      ]);
       const title = meta?.name || target.slug;
       lines.push(`⚙️  *OpenSea Drop* — ${title}${meta?.verified ? ' ✔️' : ''}`);
       const links = [];
@@ -183,6 +202,9 @@ async function runCheck(msg, rawInput) {
         const oUrl = explorerUrl(target.chain, '').replace(/\/tx\/$/, '/address/') + meta.owner;
         lines.push(`👤 deployer: [${meta.owner.slice(0, 10)}…${meta.owner.slice(-4)}](${oUrl})`);
       }
+      const maxSup = st?.maxSupply ?? meta?.totalSupply ?? null;
+      const supText = fmtSupply(maxSup, st?.totalSupply);
+      if (supText) lines.push(`📦 supply: ${supText}`);
       lines.push('', '🎬 *Stages (WIB)*');
       for (const s of drop.stages) {
         const price = s.priceUnit ? `${s.priceUnit} ${s.symbol}` : 'FREE';
@@ -263,15 +285,14 @@ async function runCheck(msg, rawInput) {
     if (col?.twitter) scLinks.push(`[Twitter](${col.twitter})`);
     if (col?.discord) scLinks.push(`[Discord](${col.discord})`);
     if (col?.opensea) scLinks.push(`[OpenSea](${col.opensea})`);
-    lines.push(
-      `⚙️  *Scatter* — ${col?.name || target.slug}`,
-      `📦 ${col?.numItems ?? '?'} / ${col?.maxItems ?? '?'} minted`,
-    );
+    lines.push(`⚙️  *Scatter* — ${col?.name || target.slug}`);
     if (scLinks.length) lines.push(`🔗 ${scLinks.join('  ·  ')}`);
     if (col?.creator) {
       const cUrl = explorerUrl(target.chain, '').replace(/\/tx\/$/, '/address/') + col.creator;
       lines.push(`👤 deployer: [${col.creator.slice(0, 10)}…${col.creator.slice(-4)}](${cUrl})`);
     }
+    const supText = fmtSupply(col?.maxItems, col?.numItems);
+    if (supText) lines.push(`📦 supply: ${supText}`);
     lines.push(
       '',
       '━━━━━━━━━━━━━━━━━━━━',
@@ -294,9 +315,12 @@ async function runCheck(msg, rawInput) {
 
   const sd = await detectSeadrop(target.contract, provider);
   if (sd.version) {
-    const drop = await getPublicDrop(sd.seadrop, target.contract, provider);
-    const root = await getAllowlistRoot(sd.seadrop, target.contract, provider);
-    const mech = await getMintMechanisms(sd.seadrop, target.contract, provider);
+    const [drop, root, mech, st] = await Promise.all([
+      getPublicDrop(sd.seadrop, target.contract, provider),
+      getAllowlistRoot(sd.seadrop, target.contract, provider),
+      getMintMechanisms(sd.seadrop, target.contract, provider),
+      tokenStatus(target.contract, provider).catch(() => null),
+    ]);
     const now = Math.floor(Date.now() / 1000);
     const active = drop.startTime <= now && (drop.endTime === 0 || drop.endTime >= now);
     const countdown = drop.startTime > now
@@ -316,6 +340,10 @@ async function runCheck(msg, rawInput) {
     lines.push(
       `⚙️  Seadrop *${sd.version}*  ·  ${active ? '🟢 ACTIVE' : '🔴 inactive'}`,
       countdown,
+    );
+    const supText = fmtSupply(st?.maxSupply, st?.totalSupply);
+    if (supText) lines.push(`📦 supply: ${supText}`);
+    lines.push(
       '',
       '💰 *Harga*',
       `    ${ethers.formatEther(drop.mintPrice)} ETH / unit`,
@@ -375,14 +403,8 @@ async function runCheck(msg, rawInput) {
     } catch (e) {
       lines.push(`⚠️  mint fn tak dikenali: _${e.message}_`);
     }
-    if (st.maxSupply != null || st.totalSupply != null) {
-      lines.push('', '📦 *Supply*');
-      if (st.totalSupply != null && st.maxSupply != null) lines.push(`    ${st.totalSupply} / ${st.maxSupply} minted`);
-      else {
-        if (st.maxSupply != null) lines.push(`    maxSupply   ${st.maxSupply}`);
-        if (st.totalSupply != null) lines.push(`    totalSupply ${st.totalSupply}`);
-      }
-    }
+    const supText = fmtSupply(st.maxSupply, st.totalSupply);
+    if (supText) lines.push('', `📦 supply: ${supText}`);
   }
   await bot.sendMessage(msg.chat.id, lines.join('\n'), { parse_mode: 'Markdown', disable_web_page_preview: true });
 }

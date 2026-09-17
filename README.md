@@ -207,6 +207,7 @@ Resolves the wallet's eligible mint lists (`eligible-invite-lists`), picks the b
 ⚙️  OpenSea Drop — Gogh Punks
 🔗 Website · Twitter · Discord · explorer
 👤 deployer: 0xc7f55cE6…7AA6
+📦 supply: 10,000 (sold out)
 
 🎬 Stages (WIB)
   🎫 stage 1: GTD · FREE · max 5 · 🟢 buka
