@@ -1,10 +1,11 @@
-// schedule.js — timed & open-detect minting
+import { ethers } from 'ethers';
 import { fmtWIB } from './time.js';
 import { getProvider } from './chains.js';
 import { mintOne, mintMany } from './mint.js';
 import { detectSeadrop, getPublicDrop } from './seadrop.js';
 import { getSessionCookies } from './opensea-auth.js';
 import { getEligibleOpenWindow } from './opensea-drop.js';
+import { resolveTargetPrice, assertPriceProtection } from './price.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -100,11 +101,12 @@ const HOT_LEAD_MS = 2000;
 const REFRESH_MS = 30_000;
 
 const CLOSED_RE = /not active|belum aktif|notactive|not started|notstarted|notenabled|not enabled|invalidmerkleproof|invalid merkle|simulation revert|execution reverted|mint not|before start|too early/i;
-const FATAL_RE = /insufficient funds|invalid private key|unknown chain|no recognized mint/i;
+const FATAL_RE = /insufficient funds|invalid private key|unknown chain|no recognized mint|proteksi harga|price exceeded|melebihi batas proteksi/i;
 
 // Poll until the mint is actually open, then send from every wallet. For
 // Seadrop, spins from `startAtUnix` (or the resolved startTime). For generic
 // mints, just polls the simulation. `wallets` may be one wallet or an array.
+// `opts` can include `maxPriceWei` to protect against price changes.
 export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {}) {
   const list = Array.isArray(wallets) ? wallets : [wallets];
 
@@ -122,6 +124,32 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
   let openAt = opts.startAtUnix ?? null;
   let endAt = opts.endAtUnix ?? 0;
   let eligibleStage = null;
+
+  // Resolve price protection: explicit maxPriceWei or auto-lock to initial detected price.
+  let maxPriceWei = opts.maxPriceWei;
+  if (maxPriceWei === undefined) {
+    try {
+      const pInfo = await resolveTargetPrice(target, list[0]);
+      if (pInfo && pInfo.priceWei != null) {
+        maxPriceWei = pInfo.priceWei;
+        onEvent({
+          stage: 'price_protect',
+          maxPriceWei,
+          maxPriceEth: pInfo.priceEth,
+          auto: true,
+          source: pInfo.source,
+        });
+      }
+    } catch { /* if price can't be resolved, maxPriceWei remains undefined */ }
+  } else if (maxPriceWei != null) {
+    onEvent({
+      stage: 'price_protect',
+      maxPriceWei,
+      maxPriceEth: ethers.formatEther(maxPriceWei),
+      auto: false,
+    });
+  }
+
   if (openAt == null && target.source === 'opensea' && target.slug) {
     try {
       const cookie = await getSessionCookies(list[0]);
@@ -179,6 +207,10 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
               if (win.endTime > 0 && nowSec() >= win.endTime) {
                 throw new Error(`stage sudah berakhir (tutup ${fmtWIB(win.endTime)}) — tidak ada yang bisa di-mint`);
               }
+              if (maxPriceWei != null && win.priceUnit != null) {
+                const curWei = ethers.parseEther(String(win.priceUnit)) * BigInt(target.amount || 1);
+                assertPriceProtection({ actualPriceWei: curWei, maxPriceWei, context: 'stage update' });
+              }
               eligibleStage = win;
               openAt = win.startTime; endAt = win.endTime;
             }
@@ -190,9 +222,24 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
               }
               openAt = win.startTime; endAt = win.endTime;
             }
+            if (maxPriceWei != null) {
+              try {
+                const provider = getProvider(target.chain);
+                const sd = await detectSeadrop(target.contract, provider);
+                if (sd.version) {
+                  const drop = await getPublicDrop(sd.seadrop, target.contract, provider);
+                  if (drop.mintPrice != null) {
+                    const curWei = drop.mintPrice * BigInt(target.amount || 1);
+                    assertPriceProtection({ actualPriceWei: curWei, maxPriceWei, context: 'drop update' });
+                  }
+                }
+              } catch (e) {
+                if (/proteksi harga/i.test(e.message)) throw e;
+              }
+            }
           }
         } catch (e) {
-          if (/sudah berakhir/.test(e.message)) throw e;
+          if (/sudah berakhir|proteksi harga/i.test(e.message)) throw e;
         }
       }
     }
@@ -220,6 +267,7 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
 
   let attempts = 0;
   let lastErr = 'unknown';
+  const mintOpts = { ...opts, maxPriceWei };
   while (Date.now() < deadline) {
     if (opts.signal?.aborted) throw new Error('schedule cancelled');
     attempts += 1;
@@ -227,9 +275,9 @@ export async function mintWhenOpen(target, wallets, onEvent = () => {}, opts = {
       // Probe openness with the first wallet. A fatal (non-timing) error
       // aborts; a closed-style revert means keep polling; success means open
       // → fan out to the remaining wallets.
-      const first = await attemptMint(target, list[0], onEvent);
+      const first = await attemptMint(target, list[0], onEvent, mintOpts);
       if (list.length === 1) return [first];
-      const rest = await attemptMany(target, list.slice(1), onEvent, opts);
+      const rest = await attemptMany(target, list.slice(1), onEvent, mintOpts);
       return [first, ...rest];
     } catch (e) {
       lastErr = e.shortMessage || e.message;

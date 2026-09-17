@@ -60,12 +60,14 @@ export function selectWallets(all, spec) {
 // The bare `w` shorthand REQUIRES `:`/`=` (never a space) so trailing words
 // ending in "w" (e.g. ".../overview 10") aren't mistaken for a spec.
 export function extractWalletSpec(input) {
+  if (!input || typeof input !== 'string') return { spec: null, rest: input || '' };
   const val = '(all|\\*|\\d+(?:\\s*,\\s*\\d+)*)';
   // Full keyword: allows space/colon/equals. Bare `w`: colon/equals only.
-  const re = new RegExp(`(?:\\b(?:--wallets|wallets)[:=\\s]+|\\bw[:=])${val}\\b`, 'i');
+  const re = new RegExp(`(?:(?:^|(?<=\\s))--wallets|\\bwallets)[:=\\s]+${val}\\b|\\bw[:=]${val}\\b`, 'i');
   const m = input.match(re);
   if (!m) return { spec: null, rest: input.trim() };
+  const valMatch = m[1] || m[2];
   const rest = (input.slice(0, m.index) + input.slice(m.index + m[0].length))
     .replace(/\s+/g, ' ').trim();
-  return { spec: m[1].replace(/\s+/g, ''), rest };
+  return { spec: valMatch.replace(/\s+/g, ''), rest };
 }

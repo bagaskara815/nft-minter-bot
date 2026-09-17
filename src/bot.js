@@ -16,6 +16,7 @@ import { ethers } from 'ethers';
 import { parseTarget } from './parse.js';
 import { resolveTarget } from './resolve.js';
 import { mintOne, mintMany, detectMintFunction, detectPrice } from './mint.js';
+import { extractMaxPriceSpec, parsePriceSpec, resolveTargetPrice } from './price.js';
 import { detectSeadrop, getPublicDrop, getAllowlistRoot, getMintMechanisms, tokenStatus } from './seadrop.js';
 import { checkAllowlist } from './allowlist.js';
 import { getEligibleLists, pickBestList } from './scatter.js';
@@ -94,8 +95,9 @@ function addJob(meta) {
 function fmtJob(j) {
   const when = j.whenUnix ? fmtWIB(j.whenUnix) : (j.mode === 'open' ? '⚡ saat buka' : '—');
   const w = j.wallets > 1 ? ` · ${j.wallets}w` : '';
+  const p = j.maxPriceWei != null ? ` · 🛡 max ${ethers.formatEther(j.maxPriceWei)} ETH` : '';
   const dot = j.status === 'running' ? '🟢' : j.status === 'watching' ? '👀' : j.status === 'done' ? '✅' : j.status === 'failed' ? '❌' : '⚪';
-  return `${dot} *#${j.id}* ${j.mode} — \`${j.contract.slice(0, 8)}…\` × ${j.amount}${w}\n     ${j.chain} · ${when} · _${j.status}_`;
+  return `${dot} *#${j.id}* ${j.mode} — \`${j.contract.slice(0, 8)}…\` × ${j.amount}${w}${p}\n     ${j.chain} · ${when} · _${j.status}_`;
 }
 
 bot.onText(/^\/start$|^\/help$/, guard(async (msg) => {
@@ -104,9 +106,13 @@ bot.onText(/^\/start$|^\/help$/, guard(async (msg) => {
     '━━━━━━━━━━━━━━━━━━━━',
     '',
     '⚡ *Mint*',
-    '`/mint` (`/m`) `<url|contract> [chain] [amount]` — mint sekarang',
-    '`/mintat` (`/ma`) `<time> | <target> …` — mint terjadwal',
-    '`/mintopen` (`/mo`) `<target> …` — mint saat buka',
+    '`/mint` (`/m`) `<url|contract> [chain] [amount] [max:price]` — mint sekarang',
+    '`/mintat` (`/ma`) `<time> | <target> … [max:price]` — mint terjadwal',
+    '`/mintopen` (`/mo`) `<target> … [max:price]` — mint saat buka',
+    '',
+    '🛡 *Proteksi Harga* (cegah bait-and-switch / kenaikan harga)',
+    '   `max:0.01` · `max:free` · `max:0.05total` · `max:any` (unlimited)',
+    '   _Default di /mintopen: auto-lock ke harga awal yang terdeteksi._',
     '',
     '🔍 *Info & Job*',
     '`/check` (`/c`) `<target>` — cek drop + eligibility (no send)',
@@ -417,6 +423,7 @@ async function streamMint(chatId, target, runner, walletCount = 1) {
       case 'still_closed': await push(`🔒 percobaan #${ev.attempts} — ${ev.lastErr}`); break;
       case 'target': await push(`🎯${tag(ev)} target \`${ev.contract}\` × ${ev.amount}`); break;
       case 'allowlist': await push(ev.eligible ? `🔐${tag(ev)} allowlist — eligible ✅` : `🌐${tag(ev)} public — _${ev.reason || 'tak di allowlist'}_`); break;
+      case 'price_protect': await push(`🛡 proteksi harga: max ${ev.maxPriceEth} ETH${ev.auto ? ' (auto-lock)' : ''}`); break;
       case 'detected': await push(`🧩${tag(ev)} ${ev.fn} — 💰 ${ev.price} ETH`); break;
       case 'gas': await push(`⛽${tag(ev)} gas limit ${ev.gasLimit}`); break;
       case 'sent': await push(`📤${tag(ev)} terkirim \`${ev.hash.slice(0, 14)}…\``); break;
@@ -443,54 +450,103 @@ async function streamMint(chatId, target, runner, walletCount = 1) {
   return { ok, total: arr.length, results: arr };
 }
 
-// Pull an optional wallet spec from the command args, resolve to a wallet set.
+// Pull optional wallet spec and max-price spec from the command args.
+function pickWalletsAndPrice(input) {
+  const { spec: walletSpec, rest: r1 } = extractWalletSpec(input);
+  const { spec: priceSpec, rest } = extractMaxPriceSpec(r1);
+  const chosen = selectWallets(WALLETS, walletSpec);
+  return { chosen, priceSpec, rest };
+}
+
 function pickWallets(input) {
-  const { spec, rest } = extractWalletSpec(input);
-  const chosen = selectWallets(WALLETS, spec);
-  return { chosen, rest };
+  return pickWalletsAndPrice(input);
 }
 
 bot.onText(/^\/(?:mint|m)\s+([\s\S]+)/, guard(async (msg, match) => {
-  const { chosen, rest } = pickWallets(match[1]);
+  const { chosen, priceSpec, rest } = pickWalletsAndPrice(match[1]);
   const target = await resolveTarget(parseTarget(rest));
-  await streamMint(msg.chat.id, target, (onEvent) => mintMany(target, chosen, onEvent), chosen.length);
+  const parsedPrice = priceSpec ? parsePriceSpec(priceSpec, target.amount) : null;
+  const maxPriceWei = parsedPrice?.isUnlimited ? null : parsedPrice?.maxPriceWei;
+  await streamMint(msg.chat.id, target, (onEvent) => mintMany(target, chosen, onEvent, { maxPriceWei }), chosen.length);
 }));
 
-// /mintat <time> | <url|contract> [chain] [amount] [wallets:all|N|1,2]
+// /mintat <time> | <url|contract> [chain] [amount] [wallets:all|N|1,2] [max:price]
 // The "|" separates the time spec from the target (times may contain spaces).
 bot.onText(/^\/(?:mintat|ma)\s+([\s\S]+)/, guard(async (msg, match) => {
   const raw = match[1];
   const bar = raw.indexOf('|');
-  if (bar === -1) throw new Error('usage: /mintat <time> | <url|contract> [chain] [amount] [wallets:all|N]');
+  if (bar === -1) throw new Error('usage: /mintat <time> | <url|contract> [chain] [amount] [wallets:all|N] [max:price]');
   const whenSpec = raw.slice(0, bar).trim();
-  const { chosen, rest: targetSpec } = pickWallets(raw.slice(bar + 1).trim());
+  const { chosen, priceSpec, rest: targetSpec } = pickWalletsAndPrice(raw.slice(bar + 1).trim());
   const whenUnix = parseWhen(whenSpec);
   if (whenUnix * 1000 <= Date.now()) throw new Error('waktu itu sudah lewat');
 
   const target = await resolveTarget(parseTarget(targetSpec));
-  const job = addJob({ mode: 'at', whenUnix, contract: target.contract, chain: target.chain, amount: target.amount || 1, wallets: chosen.length, status: 'scheduled', chatId: msg.chat.id });
+  const parsedPrice = priceSpec ? parsePriceSpec(priceSpec, target.amount) : null;
+  let maxPriceWei = parsedPrice?.maxPriceWei;
+  const isUnlimited = parsedPrice?.isUnlimited;
+  let isAutoProtect = false;
+
+  if (maxPriceWei === undefined && !isUnlimited) {
+    try {
+      const pInfo = await resolveTargetPrice(target, chosen[0]);
+      if (pInfo && pInfo.priceWei != null) {
+        maxPriceWei = pInfo.priceWei;
+        isAutoProtect = true;
+      }
+    } catch { /* ignore */ }
+  }
+
+  const job = addJob({
+    mode: 'at',
+    whenUnix,
+    contract: target.contract,
+    chain: target.chain,
+    amount: target.amount || 1,
+    wallets: chosen.length,
+    maxPriceWei: maxPriceWei ?? null,
+    status: 'scheduled',
+    chatId: msg.chat.id,
+  });
+
+  let protectText = '';
+  if (isUnlimited) {
+    protectText = '🛡 Proteksi harga: *nonaktif (unlimited)*';
+  } else if (maxPriceWei != null) {
+    const label = maxPriceWei === 0n ? 'FREE (0 ETH)' : `${ethers.formatEther(maxPriceWei)} ETH`;
+    protectText = `🛡 Proteksi harga: max *${label}*${isAutoProtect ? ' _(auto-lock harga awal)_' : ''}`;
+  }
 
   await bot.sendMessage(msg.chat.id, [
     `🗓 *Job #${job.id} dijadwalkan*`,
     '━━━━━━━━━━━━━━━━━━━━',
     `📄 \`${target.contract}\``,
     `🔗 ${target.chain}  ·  🎯 × ${job.amount}  ·  👛 ${chosen.length} wallet`,
+    ...(protectText ? [protectText] : []),
     `⏰ ${fmtWIB(whenUnix)}`,
   ].join('\n'), { parse_mode: 'Markdown' });
 
   // Fire-and-forget; streams into its own message when it triggers.
   streamMint(msg.chat.id, target, (onEvent) => {
     job.status = 'running';
-    return mintAt(target, chosen, whenUnix, onEvent, { signal: job.controller.signal });
+    return mintAt(target, chosen, whenUnix, onEvent, {
+      signal: job.controller.signal,
+      maxPriceWei: isUnlimited ? null : maxPriceWei,
+    });
   }, chosen.length).then((r) => { job.status = r.ok === r.total ? 'done' : (r.ok ? 'partial' : 'reverted'); })
     .catch((e) => { job.status = 'failed'; safeSend(msg.chat.id, `❌ job #${job.id}: ${e.message}`); })
     .finally(() => { setTimeout(() => jobs.delete(job.id), 60_000); });
 }));
 
-// /mintopen <url|contract> [chain] [amount] [wallets:all|N] — mint on open.
+// /mintopen <url|contract> [chain] [amount] [wallets:all|N] [max:price] — mint on open.
 bot.onText(/^\/(?:mintopen|mo)\s+([\s\S]+)/, guard(async (msg, match) => {
-  const { chosen, rest } = pickWallets(match[1]);
+  const { chosen, priceSpec, rest } = pickWalletsAndPrice(match[1]);
   const target = await resolveTarget(parseTarget(rest));
+
+  const parsedPrice = priceSpec ? parsePriceSpec(priceSpec, target.amount) : null;
+  let maxPriceWei = parsedPrice ? parsedPrice.maxPriceWei : undefined;
+  const isUnlimited = parsedPrice?.isUnlimited;
+  let isAutoProtect = false;
 
   // Resolve the stage this wallet is actually eligible for. For OpenSea drops
   // this is the earliest eligible stage (GTD/presale before public); falls
@@ -515,21 +571,57 @@ bot.onText(/^\/(?:mintopen|mo)\s+([\s\S]+)/, guard(async (msg, match) => {
   if (openAt == null) {
     try { openAt = await resolveOpenTime(target); } catch { /* not seadrop */ }
   }
-  const job = addJob({ mode: 'open', whenUnix: openAt, contract: target.contract, chain: target.chain, amount: target.amount || 1, wallets: chosen.length, status: 'watching', chatId: msg.chat.id });
+
+  // If maxPrice wasn't explicitly provided and not unlimited, auto-lock initial expected price
+  if (maxPriceWei === undefined && !isUnlimited) {
+    try {
+      const pInfo = await resolveTargetPrice(target, chosen[0]);
+      if (pInfo && pInfo.priceWei != null) {
+        maxPriceWei = pInfo.priceWei;
+        isAutoProtect = true;
+      }
+    } catch { /* ignore */ }
+  }
+
+  const job = addJob({
+    mode: 'open',
+    whenUnix: openAt,
+    contract: target.contract,
+    chain: target.chain,
+    amount: target.amount || 1,
+    wallets: chosen.length,
+    maxPriceWei: maxPriceWei ?? null,
+    status: 'watching',
+    chatId: msg.chat.id,
+  });
 
   const when = openAt ? fmtWIB(openAt) : '_belum diketahui — poll simulasi on-chain_';
+  let protectText = '';
+  if (isUnlimited) {
+    protectText = '🛡 Proteksi harga: *nonaktif (unlimited)*';
+  } else if (maxPriceWei != null) {
+    const label = maxPriceWei === 0n ? 'FREE (0 ETH)' : `${ethers.formatEther(maxPriceWei)} ETH`;
+    protectText = `🛡 Proteksi harga: max *${label}*${isAutoProtect ? ' _(auto-lock harga awal)_' : ''}`;
+  } else {
+    protectText = '🛡 Proteksi harga: _belum terdeteksi (gunakan max:<harga> untuk menetapkan batas)_';
+  }
+
   await bot.sendMessage(msg.chat.id, [
     `👀 *Job #${job.id} — pantau buka*`,
     '━━━━━━━━━━━━━━━━━━━━',
     `📄 \`${target.contract}\``,
     `🔗 ${target.chain}  ·  🎯 × ${job.amount}  ·  👛 ${chosen.length} wallet`,
     ...(stageLabel ? [`🎟 ${stageLabel}`] : []),
+    protectText,
     `⏰ ${when}`,
   ].join('\n'), { parse_mode: 'Markdown' });
 
   streamMint(msg.chat.id, target, (onEvent) => {
     job.status = 'running';
-    return mintWhenOpen(target, chosen, onEvent, { signal: job.controller.signal });
+    return mintWhenOpen(target, chosen, onEvent, {
+      signal: job.controller.signal,
+      maxPriceWei: isUnlimited ? null : maxPriceWei,
+    });
   }, chosen.length).then((r) => { job.status = r.ok === r.total ? 'done' : (r.ok ? 'partial' : 'reverted'); })
     .catch((e) => { job.status = 'failed'; safeSend(msg.chat.id, `❌ job #${job.id}: ${e.message}`); })
     .finally(() => { setTimeout(() => jobs.delete(job.id), 60_000); });

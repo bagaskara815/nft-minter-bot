@@ -7,6 +7,7 @@ import { getEligibleLists, pickBestList, buildScatterMint } from './scatter.js';
 import { buildOpenseaMint, explainOpenseaError } from './opensea-drop.js';
 import { getSessionCookies } from './opensea-auth.js';
 import { fmtWIB } from './time.js';
+import { PRICE_READERS, detectPrice, assertPriceProtection } from './price.js';
 
 // Ordered by specificity. Protocol-tagged entries are handled specially.
 const MINT_SIGNATURES = [
@@ -18,14 +19,6 @@ const MINT_SIGNATURES = [
   { sig: 'claim(address,uint256)', args: ['to', 'amount'] },
   { sig: 'mint(address,uint256,uint256,bytes)', args: ['to', 'id', 'amount', 'data'] },
   { sig: 'mint()', args: [] },
-];
-
-const PRICE_READERS = [
-  'function mintPrice() view returns (uint256)',
-  'function price() view returns (uint256)',
-  'function cost() view returns (uint256)',
-  'function PRICE() view returns (uint256)',
-  'function publicSalePrice() view returns (uint256)',
 ];
 
 function synthArg(name, addr, amount) {
@@ -61,18 +54,6 @@ async function detectMintFunction(contract, signer, amount) {
   throw new Error('no recognized mint function');
 }
 
-async function detectPrice(contract, provider, amount = 1) {
-  for (const sig of PRICE_READERS) {
-    try {
-      const name = sig.match(/function (\w+)/)[1];
-      const c = new ethers.Contract(contract, [sig], provider);
-      const p = await c[name]();
-      if (typeof p === 'bigint') return p * BigInt(amount);
-    } catch { continue; }
-  }
-  return 0n;
-}
-
 // Estimate gas with a 20% buffer and derive EIP-1559 fees with headroom.
 async function autoGas(provider, txRequest) {
   const feeData = await provider.getFeeData();
@@ -102,7 +83,8 @@ function parseRevert(e) {
 }
 
 // Mint one target with one wallet. `onEvent` receives progress updates for UIs.
-export async function mintOne(target, wallet, onEvent = () => {}) {
+// `opts` can include maxPriceWei for price change protection.
+export async function mintOne(target, wallet, onEvent = () => {}, opts = {}) {
   const provider = getProvider(target.chain);
   const signer = wallet.connect(provider);
   const amount = target.amount || 1;
@@ -112,14 +94,14 @@ export async function mintOne(target, wallet, onEvent = () => {}) {
   // Scatter.art collections use a custom mint entrypoint; the API builds the
   // tx (proof + signature). Handle entirely here, then return.
   if (target.source === 'scatter') {
-    return await mintScatter(target, signer, provider, amount, onEvent);
+    return await mintScatter(target, signer, provider, amount, onEvent, opts);
   }
 
   // OpenSea Drops (OS2): the mint tx is generated server-side via GraphQL
   // (relayer + requestId). Only route here when we have the collection slug
   // (collection URL). Assets URLs without a slug fall through to Seadrop.
   if (target.source === 'opensea' && target.slug) {
-    return await mintOpenseaDrop(target, signer, provider, amount, onEvent);
+    return await mintOpenseaDrop(target, signer, provider, amount, onEvent, opts);
   }
 
   // Prefer Seadrop path when the token is Seadrop-managed.
@@ -195,6 +177,7 @@ export async function mintOne(target, wallet, onEvent = () => {}) {
   }
 
   onEvent({ stage: 'detected', fn: fnLabel, price: ethers.formatEther(price) });
+  assertPriceProtection({ actualPriceWei: price, maxPriceWei: opts.maxPriceWei, context: fnLabel });
 
   // Simulate before broadcast.
   try {
@@ -235,7 +218,7 @@ const ERC20_ABI = [
 // Mint from a Scatter.art collection. Resolves the wallet's eligible lists,
 // picks the best (cheapest native, else token), asks the API to build the tx,
 // approves any ERC20 payment, then simulates → sends → waits.
-async function mintScatter(target, signer, provider, amount, onEvent) {
+async function mintScatter(target, signer, provider, amount, onEvent, opts = {}) {
   const slug = target.scatter?.slug || target.slug;
   const col = target.scatter;
 
@@ -262,6 +245,7 @@ async function mintScatter(target, signer, provider, amount, onEvent) {
 
   const fnLabel = `scatter "${list.name}" × ${amount}`;
   onEvent({ stage: 'detected', fn: fnLabel, price: ethers.formatEther(built.value) });
+  assertPriceProtection({ actualPriceWei: built.value, maxPriceWei: opts.maxPriceWei, context: fnLabel });
 
   // Approve any ERC20 payments the mint requires before sending.
   for (const erc20 of built.erc20s) {
@@ -312,7 +296,7 @@ async function mintScatter(target, signer, provider, amount, onEvent) {
 // send it directly. Eligibility/signature for signed presale stages is
 // enforced by OpenSea's backend and may require a logged-in session — those
 // fail here with a clear reason (not-eligible / drop-not-minting).
-async function mintOpenseaDrop(target, signer, provider, amount, onEvent) {
+async function mintOpenseaDrop(target, signer, provider, amount, onEvent, opts = {}) {
   const slug = target.slug;
 
   const buildArgs = {
@@ -354,6 +338,7 @@ async function mintOpenseaDrop(target, signer, provider, amount, onEvent) {
     : built.stageType || '?';
   const fnLabel = `opensea ${stageLabel}${built.stageIndex != null ? ` #${built.stageIndex}` : ''}${built.crossChain ? ' (relayer)' : ''} × ${amount}`;
   onEvent({ stage: 'detected', fn: fnLabel, price: ethers.formatEther(built.value) });
+  assertPriceProtection({ actualPriceWei: built.value, maxPriceWei: opts.maxPriceWei, context: fnLabel });
 
   const txRequest = { to: built.to, from: signer.address, data: built.data, value: built.value };
 
@@ -391,7 +376,7 @@ async function mintOpenseaDrop(target, signer, provider, amount, onEvent) {
 // own mintOne (independent nonce/simulation). Never rejects — failures are
 // captured per wallet. onEvent is tagged with { wallet } for multi context.
 export async function mintMany(target, wallets, onEvent = () => {}, opts = {}) {
-  if (wallets.length === 1) return [await mintOne(target, wallets[0], onEvent)];
+  if (wallets.length === 1) return [await mintOne(target, wallets[0], onEvent, opts)];
 
   const limit = Math.max(1, opts.concurrency ?? 5);
   const results = new Array(wallets.length);
@@ -403,7 +388,7 @@ export async function mintMany(target, wallets, onEvent = () => {}, opts = {}) {
       const w = wallets[i];
       const tag = (ev) => onEvent({ ...ev, wallet: w.address });
       try {
-        results[i] = await mintOne(target, w, tag);
+        results[i] = await mintOne(target, w, tag, opts);
       } catch (e) {
         results[i] = { wallet: w.address, status: 'error', error: e.shortMessage || e.message };
         onEvent({ stage: 'wallet_error', wallet: w.address, error: results[i].error });
@@ -415,4 +400,4 @@ export async function mintMany(target, wallets, onEvent = () => {}, opts = {}) {
   return results;
 }
 
-export { detectMintFunction, detectPrice, autoGas };
+export { detectMintFunction, detectPrice, autoGas, PRICE_READERS };

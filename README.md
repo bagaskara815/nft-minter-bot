@@ -26,6 +26,7 @@ Auto-detects the mint path across OpenSea Seadrop, OpenSea Drops (OS2), Scatter.
 - [🔐 Eligibility & Auth](#-eligibility--auth)
 - [👛 Multi-Wallet](#-multi-wallet)
 - [⌨️ CLI](#️-cli)
+- [🛡️ Price Protection](#️-price-protection)
 - [🧩 Input Shapes](#-input-shapes)
 - [⚙️ Detection Pipeline](#️-detection-pipeline)
 - [🛡️ Security](#️-security)
@@ -44,6 +45,7 @@ Auto-detects the mint path across OpenSea Seadrop, OpenSea Drops (OS2), Scatter.
 | 🎫 | **Scatter.art** | Resolves eligible mint lists via public API (proof + signature server-built), ERC20 payment support |
 | 👀 | **Eligibility preview** | `/check` shows per-wallet eligibility, price/max, stages, project links + deployer |
 | 🕒 | **Scheduled + snipe** | `/mintat` fires at a time; `/mintopen` polls on-chain and mints the instant it opens |
+| 🛡️ | **Price protection** | `/mintopen` auto-locks initial price; aborts if creator raises price (bait-and-switch); supports `max:price` |
 | 🪙 | **Multi-wallet** | Fan one mint across many wallets concurrently (independent nonce + simulation) |
 | ⚡ | **Session pre-warm** | SIWE sessions cached & warmed during the wait so login never sits in the mint critical path |
 | 🔗 | **Auto-listener + shortcuts** | Bare URL/contract triggers `/check`; `/m` `/c` `/ma` `/mo` shortcuts |
@@ -121,9 +123,9 @@ npm run bot
 ## 🎮 Bot Commands
 | Command | Shortcut | Action |
 |---------|:--------:|--------|
-| `/mint <target> [wallets:all\|N]` | `/m` | detect → simulate → send → report |
-| `/mintat <time> \| <target> [wallets:all\|N]` | `/ma` | schedule a mint for a time |
-| `/mintopen <target> [wallets:all\|N]` | `/mo` | poll on-chain open, mint the instant it opens |
+| `/mint <target> [wallets:all\|N] [max:price]` | `/m` | detect → simulate → send → report |
+| `/mintat <time> \| <target> [wallets:all\|N] [max:price]` | `/ma` | schedule a mint for a time |
+| `/mintopen <target> [wallets:all\|N] [max:price]` | `/mo` | poll on-chain open, mint the instant it opens (auto-locks price) |
 | `/check <target> [wallets:all\|N]` | `/c` | **dry run** — config, price, stages, per-wallet eligibility, links |
 | `/jobs` | — | list scheduled / running jobs |
 | `/cancel <id>` | — | cancel a scheduled or watching job |
@@ -257,14 +259,29 @@ node src/mint-cli.js 0xABC... base 3
 node src/mint-cli.js https://opensea.io/assets/base/0xABC.../1
 node src/mint-cli.js "0xABC... on robinhood x2"
 
-# scheduled / open-mint / multi-wallet
+# scheduled / open-mint / multi-wallet / price-protection
 node src/mint-cli.js --at "2026-08-12T14:00" 0xABC... base 3
 node src/mint-cli.js --at "in 5m"             0xABC... base
 node src/mint-cli.js --when-open              0xABC... base 2
+node src/mint-cli.js --when-open --max-price 0.01 0xABC... base 1
 node src/mint-cli.js --wallets all --when-open 0xABC... base 1
 ```
 
 > `--when-open` reads the Seadrop `startTime`, coarse-waits until just before it, then polls the simulation every **400ms** and sends on the first block that passes. Falls back to pure simulation-polling for non-Seadrop contracts.
+
+---
+
+## 🛡️ Price Protection
+
+When using `/mintopen` or `--when-open`, drops initially announced as cheap or **FREE** risk having their price raised by the creator right at launch (bait-and-switch / rug pull).
+
+- **Auto-Lock Baseline**: By default, `/mintopen` and `--when-open` automatically lock in the initial price detected when the command is queued. If the creator raises the price on-chain or in the OpenSea drop stage before/at open, the bot **immediately aborts the transaction** without burning gas fees.
+- **Custom Price Cap (`max:price` / `--max-price`)**: You can specify custom price limits:
+  - `max:0.01` or `--max-price 0.01` (maximum 0.01 ETH per unit)
+  - `max:free` or `max:0` (only allow 0 ETH / free mints)
+  - `max:0.05total` (total spending cap across all minted quantities)
+  - `max:any` or `max:unlimited` (disables price protection)
+- **Multi-Level Early Abort**: Price protection is verified at multiple stages: during the coarse wait loop (re-probed every 30s), when calldata is generated, and before the `eth_call` simulation is executed.
 
 ---
 

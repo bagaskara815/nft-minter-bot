@@ -12,14 +12,17 @@ import { mintOne, mintMany } from './mint.js';
 import { mintAt, mintWhenOpen, parseWhen } from './schedule.js';
 import { fmtDuration } from './time.js';
 import { loadWallets, selectWallets } from './wallets.js';
+import { extractMaxPriceSpec, parsePriceSpec } from './price.js';
 
 function parseFlags(argv) {
-  const out = { at: null, whenOpen: false, wallets: null, rest: [] };
+  const out = { at: null, whenOpen: false, wallets: null, maxPrice: null, rest: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--at') { out.at = argv[++i]; }
     else if (a === '--when-open' || a === '--open') { out.whenOpen = true; }
     else if (a === '--wallets' || a === '-w') { out.wallets = argv[++i]; }
+    else if (a === '--max-price' || a === '--maxprice' || a === '-p') { out.maxPrice = argv[++i]; }
+    else if (a.startsWith('--max-price=') || a.startsWith('--maxprice=')) { out.maxPrice = a.split('=')[1]; }
     else out.rest.push(a);
   }
   return out;
@@ -32,6 +35,8 @@ function logEvent(ev) {
     case 'waiting_open': console.log(`[WAIT]   buka on-chain ${ev.wib}`); break;
     case 'polling': console.log(`[POLL]   every ${ev.pollMs}ms until open`); break;
     case 'still_closed': console.log(`[CLOSED] attempt ${ev.attempts}: ${ev.lastErr}`); break;
+    case 'allowlist': console.log(`[AL]${w}      ${ev.eligible ? 'eligible' : 'not eligible'}${ev.reason ? ` (${ev.reason})` : ''}`); break;
+    case 'price_protect': console.log(`[PROTECT] max price ${ev.maxPriceEth} ETH${ev.auto ? ' (auto-lock)' : ''}`); break;
     case 'target': console.log(`[TARGET]${w} ${ev.contract} on ${ev.chain} × ${ev.amount}`); break;
     case 'detected': console.log(`[FN]${w}     ${ev.fn}  ${ev.price} ETH`); break;
     case 'gas': console.log(`[GAS]${w}    limit ${ev.gasLimit}`); break;
@@ -52,13 +57,14 @@ function report(results) {
 }
 
 async function main() {
-  const { at, whenOpen, wallets: walletSpec, rest } = parseFlags(process.argv.slice(2));
+  const { at, whenOpen, wallets: walletSpec, maxPrice, rest } = parseFlags(process.argv.slice(2));
   const input = rest.join(' ');
   if (!input) {
-    console.error('usage: node src/mint-cli.js [--at <time>] [--when-open] [--wallets all|N|1,2] <url|contract> [chain] [amount]');
-    console.error('  --at <time>       ISO 8601, unix, "in 5m", "30s", or "HH:MM" (WIB)');
-    console.error('  --when-open       poll on-chain open time, mint the instant it opens');
-    console.error('  --wallets <spec>  all | N | 1,3 (default: single primary wallet)');
+    console.error('usage: node src/mint-cli.js [--at <time>] [--when-open] [--wallets all|N|1,2] [--max-price <price>] <url|contract> [chain] [amount] [max:price]');
+    console.error('  --at <time>          ISO 8601, unix, "in 5m", "30s", or "HH:MM" (WIB)');
+    console.error('  --when-open          poll on-chain open time, mint the instant it opens (auto-locks price)');
+    console.error('  --wallets <spec>     all | N | 1,3 (default: single primary wallet)');
+    console.error('  --max-price <price>  max price cap in ETH, "free", or "any" (e.g. --max-price 0.01)');
     process.exit(1);
   }
 
@@ -67,15 +73,25 @@ async function main() {
   const chosen = selectWallets(all, walletSpec);
   console.log(`[WALLETS] ${chosen.length}/${all.length} — ${chosen.map((w) => w.address.slice(0, 8)).join(', ')}`);
 
-  const target = await resolveTarget(parseTarget(input));
+  const { spec: embeddedPrice, rest: cleanInput } = extractMaxPriceSpec(input);
+  const target = await resolveTarget(parseTarget(cleanInput));
+
+  const effectivePriceSpec = maxPrice || embeddedPrice;
+  const parsedPrice = effectivePriceSpec ? parsePriceSpec(effectivePriceSpec, target.amount) : null;
+  const maxPriceWei = parsedPrice?.isUnlimited ? null : parsedPrice?.maxPriceWei;
+  const opts = { maxPriceWei };
+
+  if (maxPriceWei != null) {
+    console.log(`[PROTECT] max price cap: ${ethers.formatEther(maxPriceWei)} ETH`);
+  }
 
   let result;
   if (at) {
-    result = await mintAt(target, chosen, parseWhen(at), logEvent);
+    result = await mintAt(target, chosen, parseWhen(at), logEvent, opts);
   } else if (whenOpen) {
-    result = await mintWhenOpen(target, chosen, logEvent);
+    result = await mintWhenOpen(target, chosen, logEvent, opts);
   } else {
-    result = await mintMany(target, chosen, logEvent);
+    result = await mintMany(target, chosen, logEvent, opts);
   }
   report(result);
 }
