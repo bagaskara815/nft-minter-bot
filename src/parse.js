@@ -17,6 +17,7 @@ export function chainSlug(s) {
     peaq: 'peaq',
     'robinhood-chain': 'robinhood', robinhood: 'robinhood', rhoc: 'robinhood',
     'arc-network': 'arc', arc: 'arc', circle: 'arc',
+    elysium: 'elysium', ely: 'elysium',
   };
   return map[s.toLowerCase()] || s.toLowerCase();
 }

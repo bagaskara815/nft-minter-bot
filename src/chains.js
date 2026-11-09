@@ -19,6 +19,8 @@ export const RPCS = {
   ink: process.env.RPC_INK || 'https://ink.api.pocket.network',
   // Arc — Circle's EVM L2 (chainId 5042), USDC gas.
   arc: process.env.RPC_ARC || 'https://rpc.mainnet.arc.io',
+  // Elysium — Arbitrum Orbit L2 on HyperEVM (chainId 99901), HYPE gas.
+  elysium: process.env.RPC_ELYSIUM || 'https://heliosliq.app/rpc',
 };
 
 export const CHAIN_IDS = {
@@ -35,6 +37,7 @@ export const CHAIN_IDS = {
   robinhood: 4663,
   ink: 57073,
   arc: 5042,
+  elysium: 99901,
 };
 
 const EXPLORERS = {
@@ -51,6 +54,7 @@ const EXPLORERS = {
   robinhood: 'https://robinhoodchain.blockscout.com/tx/',
   ink: 'https://explorer.inkonchain.com/tx/',
   arc: 'https://explorer.arc.io/tx/',
+  elysium: 'https://elysium.kinetiq.xyz/explorer/tx/',
 };
 
 export const explorerUrl = (chain, hash) => (EXPLORERS[chain] || '') + hash;
